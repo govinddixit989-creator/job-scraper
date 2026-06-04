@@ -14,22 +14,15 @@ interface Props {
   apiKeys: ApiKeys
 }
 
-// ─── PDF extractor ────────────────────────────────────────────────────────────
+// ─── PDF extractor (server-side, no worker needed) ───────────────────────────
 async function extractText(file: File): Promise<string> {
-  if (file.name.endsWith(".pdf") || file.type === "application/pdf") {
-    const pdfjsLib = await import("pdfjs-dist")
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`
-    const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-    let text = ""
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i)
-      const content = await page.getTextContent()
-      text += content.items.map((item) => ("str" in item ? item.str : "")).join(" ") + "\n"
-    }
-    return text
-  }
-  return file.text()
+  const formData = new FormData()
+  formData.append("file", file)
+  const res = await fetch("/api/extract-text", { method: "POST", body: formData })
+  if (!res.ok) throw new Error(await res.text())
+  const data = await res.json()
+  if (data.error) throw new Error(data.error)
+  return data.text as string
 }
 
 const SENIORITY_OPTIONS: { value: Seniority; label: string; years: string }[] = [
