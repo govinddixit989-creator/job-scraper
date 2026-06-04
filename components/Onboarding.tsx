@@ -3,10 +3,9 @@
 import { useState, useRef } from "react"
 import { UserPreferences, WorkType, Seniority, ApiKeys } from "@/lib/types"
 import { Input } from "@/components/ui/input"
-import { Badge } from "@/components/ui/badge"
 import {
   Upload, CheckCircle2, Loader2, X, Plus,
-  FileText, Pencil, ArrowRight, Sparkles,
+  FileText, ArrowRight, Sparkles, ClipboardPaste,
 } from "lucide-react"
 
 interface Props {
@@ -14,23 +13,12 @@ interface Props {
   apiKeys: ApiKeys
 }
 
-// ─── PDF extractor (server-side, no worker needed) ───────────────────────────
-async function extractText(file: File): Promise<string> {
-  const formData = new FormData()
-  formData.append("file", file)
-  const res = await fetch("/api/extract-text", { method: "POST", body: formData })
-  if (!res.ok) throw new Error(await res.text())
-  const data = await res.json()
-  if (data.error) throw new Error(data.error)
-  return data.text as string
-}
-
 const SENIORITY_OPTIONS: { value: Seniority; label: string; years: string }[] = [
-  { value: "fresher", label: "Fresher",       years: "0 years" },
-  { value: "junior",  label: "Junior",         years: "1–2 years" },
-  { value: "mid",     label: "Mid-level",      years: "3–5 years" },
-  { value: "senior",  label: "Senior",         years: "6–9 years" },
-  { value: "lead",    label: "Lead / Staff",   years: "10+ years" },
+  { value: "fresher", label: "Fresher",     years: "0 years" },
+  { value: "junior",  label: "Junior",      years: "1–2 years" },
+  { value: "mid",     label: "Mid-level",   years: "3–5 years" },
+  { value: "senior",  label: "Senior",      years: "6–9 years" },
+  { value: "lead",    label: "Lead / Staff", years: "10+ years" },
 ]
 
 const WORK_TYPES: { value: WorkType; label: string }[] = [
@@ -45,9 +33,12 @@ type Step = "upload" | "parsing" | "review"
 export default function Onboarding({ onComplete, apiKeys }: Props) {
   const [step, setStep] = useState<Step>("upload")
   const [parseError, setParseError] = useState("")
+  const [parseStatus, setParseStatus] = useState("")  // progress messages
   const [rawText, setRawText] = useState("")
   const [fileName, setFileName] = useState("")
   const [summary, setSummary] = useState("")
+  const [pasteMode, setPasteMode] = useState(false)
+  const [pastedText, setPastedText] = useState("")
 
   // Editable parsed fields
   const [roles, setRoles] = useState<string[]>([])
@@ -57,49 +48,95 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
   const [experienceYears, setExperienceYears] = useState(0)
   const [salary, setSalary] = useState("")
 
-  // Inline add inputs
   const [roleInput, setRoleInput] = useState("")
   const [skillInput, setSkillInput] = useState("")
-
   const fileRef = useRef<HTMLInputElement>(null)
 
-  // ── File processing ──────────────────────────────────────────────────────────
+  // ── Groq parsing ─────────────────────────────────────────────────────────────
+  const parseWithGroq = async (text: string) => {
+    setParseStatus("Sending to Groq AI…")
+    const res = await fetch("/api/parse-resume", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-groq-key": apiKeys.groq },
+      body: JSON.stringify({ text }),
+    })
+    if (!res.ok) {
+      const body = await res.text()
+      throw new Error(`Groq error ${res.status}: ${body.slice(0, 200)}`)
+    }
+    const parsed = await res.json()
+    if (parsed.error) throw new Error(`Groq parse: ${parsed.error}`)
+    return parsed
+  }
+
+  const applyParsed = (parsed: Record<string, unknown>) => {
+    setRoles((parsed.roles as string[]) ?? [])
+    setSkills([...new Set((parsed.skills as string[]) ?? [])])
+    setSeniority((parsed.seniority as Seniority) ?? "mid")
+    setExperienceYears((parsed.experience_years as number) ?? 0)
+    setSummary((parsed.summary as string) ?? "")
+    setSalary((parsed.salary_expectation as string) ?? "")
+    const wt: WorkType[] = (parsed.work_type_preference as WorkType[])?.length
+      ? (parsed.work_type_preference as WorkType[])
+      : ["remote"]
+    setWorkTypes(wt)
+  }
+
+  // ── File upload flow ──────────────────────────────────────────────────────────
   const processFile = async (file: File) => {
     setParseError("")
+    setParseStatus("")
     setFileName(file.name)
     setStep("parsing")
 
     try {
-      const text = await extractText(file)
+      // Step 1: extract text
+      setParseStatus("Extracting text from resume…")
+      const formData = new FormData()
+      formData.append("file", file)
+      const extractRes = await fetch("/api/extract-text", { method: "POST", body: formData })
+      const extractData = await extractRes.json()
+
+      if (!extractRes.ok || extractData.error) {
+        // Scanned PDF or extraction failure — show paste fallback
+        setParseError(extractData.error ?? "Could not read PDF text.")
+        setPasteMode(true)
+        setStep("upload")
+        return
+      }
+
+      const text: string = extractData.text
       setRawText(text)
 
-      const res = await fetch("/api/parse-resume", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-groq-key": apiKeys.groq },
-        body: JSON.stringify({ text }),
-      })
-
-      if (!res.ok) throw new Error(await res.text())
-      const parsed = await res.json()
-
-      // Populate all fields from AI response
-      setRoles(parsed.roles ?? [])
-      setSkills([
-        ...new Set([...(parsed.skills ?? [])]),
-      ])
-      setSeniority(parsed.seniority ?? "mid")
-      setExperienceYears(parsed.experience_years ?? 0)
-      setSummary(parsed.summary ?? "")
-      setSalary(parsed.salary_expectation ?? "")
-
-      const wt: WorkType[] = parsed.work_type_preference?.length
-        ? parsed.work_type_preference
-        : ["remote"]
-      setWorkTypes(wt)
-
+      // Step 2: Groq parse
+      const parsed = await parseWithGroq(text)
+      applyParsed(parsed)
       setStep("review")
     } catch (e) {
-      setParseError(`Could not parse resume: ${String(e).slice(0, 120)}`)
+      console.error("processFile error:", e)
+      const msg = e instanceof Error ? e.message : String(e)
+      setParseError(`Parse failed: ${msg.slice(0, 200)}`)
+      setStep("upload")
+    }
+  }
+
+  // ── Paste flow ────────────────────────────────────────────────────────────────
+  const processPastedText = async () => {
+    if (!pastedText.trim()) return
+    setParseError("")
+    setParseStatus("")
+    setFileName("pasted text")
+    setRawText(pastedText)
+    setStep("parsing")
+
+    try {
+      const parsed = await parseWithGroq(pastedText)
+      applyParsed(parsed)
+      setStep("review")
+    } catch (e) {
+      console.error("processPastedText error:", e)
+      const msg = e instanceof Error ? e.message : String(e)
+      setParseError(`Parse failed: ${msg.slice(0, 200)}`)
       setStep("upload")
     }
   }
@@ -110,134 +147,165 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
     if (file) processFile(file)
   }
 
-  // ── Chip helpers ─────────────────────────────────────────────────────────────
-  const addRole = (v: string) => {
-    const t = v.trim()
-    if (t && !roles.includes(t)) setRoles((p) => [...p, t])
-    setRoleInput("")
-  }
-  const addSkill = (v: string) => {
-    const t = v.trim()
-    if (t && !skills.includes(t)) setSkills((p) => [...p, t])
-    setSkillInput("")
-  }
+  // ── Chip helpers ──────────────────────────────────────────────────────────────
+  const addRole  = (v: string) => { const t = v.trim(); if (t && !roles.includes(t))  setRoles((p)  => [...p, t]); setRoleInput("") }
+  const addSkill = (v: string) => { const t = v.trim(); if (t && !skills.includes(t)) setSkills((p) => [...p, t]); setSkillInput("") }
   const toggleWorkType = (wt: WorkType) => {
     if (wt === "any") { setWorkTypes(["any"]); return }
     setWorkTypes((prev) => {
-      const without = prev.filter((x) => x !== "any")
-      return without.includes(wt) ? without.filter((x) => x !== wt) : [...without, wt]
+      const w = prev.filter((x) => x !== "any")
+      return w.includes(wt) ? w.filter((x) => x !== wt) : [...w, wt]
     })
   }
 
-  // ── Submit ────────────────────────────────────────────────────────────────────
   const handleSubmit = () => {
     onComplete({
-      roles,
-      skills,
+      roles, skills,
       workTypes: workTypes.length ? workTypes : ["any"],
-      experienceYears,
-      seniority,
+      experienceYears, seniority,
       salaryExpectation: salary || undefined,
       resumeText: rawText || undefined,
       resumeName: fileName || undefined,
     })
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Step: Upload
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────────
+  // STEP: Parsing
+  // ────────────────────────────────────────────────────────────────────────────
+  if (step === "parsing") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+        <div className="flex flex-col items-center gap-5 text-center">
+          <div className="relative w-16 h-16">
+            <div className="w-16 h-16 rounded-full border-4 border-muted flex items-center justify-center">
+              <Sparkles size={24} className="text-primary" />
+            </div>
+            <Loader2 size={64} className="animate-spin text-primary/20 absolute inset-0" />
+          </div>
+          <div>
+            <p className="font-semibold text-lg">Analysing your resume…</p>
+            <p className="text-muted-foreground text-sm mt-1">{parseStatus || "Groq AI is reading your profile"}</p>
+            {fileName && <p className="text-xs text-muted-foreground mt-0.5">{fileName}</p>}
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ────────────────────────────────────────────────────────────────────────────
+  // STEP: Upload
+  // ────────────────────────────────────────────────────────────────────────────
   if (step === "upload") {
     return (
       <div className="min-h-screen flex items-center justify-center bg-background p-4">
         <div className="w-full max-w-md space-y-6">
+
+          {/* Header */}
           <div className="text-center space-y-2">
             <div className="w-12 h-12 bg-primary rounded-2xl flex items-center justify-center mx-auto">
               <FileText size={22} className="text-primary-foreground" />
             </div>
-            <h1 className="text-2xl font-bold">Upload your resume</h1>
-            <p className="text-muted-foreground text-sm leading-relaxed">
-              We'll parse it with AI and auto-fill your profile — roles, skills, experience, everything.
-              No manual typing.
+            <h1 className="text-2xl font-bold">Add your resume</h1>
+            <p className="text-sm text-muted-foreground">
+              AI parses it and fills your profile automatically.
             </p>
           </div>
 
-          <div
-            onDrop={handleDrop}
-            onDragOver={(e) => e.preventDefault()}
-            onClick={() => fileRef.current?.click()}
-            className="border-2 border-dashed border-border hover:border-primary/50 rounded-xl p-14 flex flex-col items-center gap-3 cursor-pointer hover:bg-muted/30 transition-colors"
-          >
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".pdf,.docx,.txt"
-              className="hidden"
-              onChange={(e) => e.target.files?.[0] && processFile(e.target.files[0])}
-            />
-            <Upload size={32} className="text-muted-foreground" />
-            <div className="text-center">
-              <p className="font-medium">Drop your resume here</p>
-              <p className="text-sm text-muted-foreground mt-1">PDF, DOCX, or TXT · Stored only in your browser</p>
+          {/* Error */}
+          {parseError && (
+            <div className="bg-destructive/10 border border-destructive/20 rounded-lg px-4 py-3 text-sm text-destructive">
+              {parseError}
             </div>
+          )}
+
+          {/* Tabs: Upload vs Paste */}
+          <div className="flex rounded-lg border overflow-hidden">
+            <button
+              onClick={() => setPasteMode(false)}
+              className={`flex-1 py-2 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
+                !pasteMode ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+              }`}
+            >
+              <Upload size={14} /> Upload PDF
+            </button>
+            <button
+              onClick={() => setPasteMode(true)}
+              className={`flex-1 py-2 text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
+                pasteMode ? "bg-primary text-primary-foreground" : "hover:bg-muted"
+              }`}
+            >
+              <ClipboardPaste size={14} /> Paste text
+            </button>
           </div>
 
-          {parseError && (
-            <p className="text-sm text-destructive text-center">{parseError}</p>
+          {!pasteMode ? (
+            /* Upload dropzone */
+            <div
+              onDrop={handleDrop}
+              onDragOver={(e) => e.preventDefault()}
+              onClick={() => fileRef.current?.click()}
+              className="border-2 border-dashed border-border hover:border-primary/50 rounded-xl p-14 flex flex-col items-center gap-3 cursor-pointer hover:bg-muted/30 transition-colors"
+            >
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".pdf,.docx,.txt"
+                className="hidden"
+                onChange={(e) => e.target.files?.[0] && processFile(e.target.files[0])}
+              />
+              <Upload size={30} className="text-muted-foreground" />
+              <div className="text-center">
+                <p className="font-medium">Drop your resume here</p>
+                <p className="text-sm text-muted-foreground mt-0.5">PDF, DOCX, or TXT</p>
+              </div>
+            </div>
+          ) : (
+            /* Paste textarea */
+            <div className="space-y-3">
+              <p className="text-sm text-muted-foreground">
+                Open your resume PDF, select all (Ctrl+A), copy, and paste below.
+              </p>
+              <textarea
+                value={pastedText}
+                onChange={(e) => setPastedText(e.target.value)}
+                placeholder="Paste your full resume text here…"
+                rows={10}
+                className="w-full border rounded-lg p-3 text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-ring bg-background"
+              />
+              <button
+                onClick={processPastedText}
+                disabled={!pastedText.trim()}
+                className="w-full py-2.5 bg-primary text-primary-foreground rounded-lg font-medium disabled:opacity-40 hover:opacity-90 transition-opacity flex items-center justify-center gap-2"
+              >
+                <Sparkles size={15} /> Analyse with AI
+              </button>
+            </div>
           )}
 
           <p className="text-xs text-center text-muted-foreground">
-            Powered by Groq Llama 3 · Your resume never leaves your browser except to Groq's API
+            Stored only in your browser · processed by Groq API
           </p>
         </div>
       </div>
     )
   }
 
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Step: Parsing
-  // ─────────────────────────────────────────────────────────────────────────────
-  if (step === "parsing") {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-background p-4">
-        <div className="flex flex-col items-center gap-6 text-center">
-          <div className="relative">
-            <div className="w-16 h-16 rounded-full border-4 border-muted flex items-center justify-center">
-              <Sparkles size={24} className="text-primary" />
-            </div>
-            <Loader2 size={64} className="animate-spin text-primary absolute inset-0 opacity-20" />
-          </div>
-          <div>
-            <p className="font-semibold text-lg">Reading your resume…</p>
-            <p className="text-muted-foreground text-sm mt-1">
-              Groq AI is extracting your skills, experience, and roles
-            </p>
-            <p className="text-xs text-muted-foreground mt-1">{fileName}</p>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // ─────────────────────────────────────────────────────────────────────────────
-  // Step: Review
-  // ─────────────────────────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────────────────────
+  // STEP: Review
+  // ────────────────────────────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-background">
       <div className="max-w-2xl mx-auto px-4 py-10 space-y-8">
 
-        {/* Header */}
         <div className="space-y-1">
           <div className="flex items-center gap-2">
             <CheckCircle2 size={20} className="text-green-500" />
             <h1 className="text-xl font-bold">Resume parsed — review your profile</h1>
           </div>
           {summary && <p className="text-sm text-muted-foreground leading-relaxed">{summary}</p>}
-          <p className="text-xs text-muted-foreground flex items-center gap-1.5">
-            <FileText size={12} /> {fileName}
-            <button
-              onClick={() => setStep("upload")}
-              className="underline hover:no-underline ml-1"
-            >
+          <p className="text-xs text-muted-foreground flex items-center gap-1.5 mt-1">
+            <FileText size={11} /> {fileName}
+            <button onClick={() => setStep("upload")} className="underline hover:no-underline ml-1">
               Replace
             </button>
           </p>
@@ -246,16 +314,14 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
         {/* Experience */}
         <section className="space-y-3">
           <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">Experience</h2>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="flex flex-wrap gap-4 items-end">
             <div className="space-y-1.5">
               <label className="text-sm font-medium">Years of experience</label>
               <Input
-                type="number"
-                min={0}
-                max={40}
+                type="number" min={0} max={40}
                 value={experienceYears}
                 onChange={(e) => setExperienceYears(Number(e.target.value))}
-                className="h-9 w-28"
+                className="h-9 w-24"
               />
             </div>
             <div className="space-y-1.5">
@@ -265,12 +331,12 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
                   <button
                     key={value}
                     onClick={() => setSeniority(value)}
+                    title={years}
                     className={`px-3 py-1.5 rounded-lg border text-sm transition-all ${
                       seniority === value
                         ? "border-primary bg-primary/10 text-primary font-medium"
                         : "border-border hover:border-muted-foreground/40"
                     }`}
-                    title={years}
                   >
                     {label}
                   </button>
@@ -283,7 +349,7 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
         {/* Target Roles */}
         <section className="space-y-3">
           <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">
-            Target roles <span className="text-xs font-normal normal-case">(what to search for)</span>
+            Target roles <span className="text-xs font-normal normal-case text-muted-foreground">(what to search for)</span>
           </h2>
           <div className="flex flex-wrap gap-2">
             {roles.map((r) => (
@@ -316,9 +382,10 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
         {/* Skills */}
         <section className="space-y-3">
           <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">
-            Skills & technologies <span className="text-xs font-normal normal-case">({skills.length} detected)</span>
+            Skills & technologies
+            <span className="text-xs font-normal normal-case text-muted-foreground ml-1">({skills.length} detected)</span>
           </h2>
-          <div className="flex flex-wrap gap-1.5 max-h-44 overflow-y-auto">
+          <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
             {skills.map((s) => (
               <span key={s} className="flex items-center gap-1 px-2 py-0.5 bg-muted rounded-md text-xs font-mono">
                 {s}
@@ -371,10 +438,10 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
           </div>
         </section>
 
-        {/* Salary expectation */}
-        <section className="space-y-3">
+        {/* Salary */}
+        <section className="space-y-2">
           <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">
-            Salary expectation <span className="text-xs font-normal normal-case">(optional — used to filter jobs)</span>
+            Salary expectation <span className="text-xs font-normal normal-case">(optional)</span>
           </h2>
           <Input
             placeholder="e.g. $4000/mo or ₹20 LPA"
@@ -384,7 +451,6 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
           />
         </section>
 
-        {/* Submit */}
         <div className="pt-2">
           <button
             onClick={handleSubmit}
