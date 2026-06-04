@@ -120,36 +120,32 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
       formData.append("file", file)
       const extractRes = await fetch("/api/extract-text", { method: "POST", body: formData })
 
-      if (extractRes.status === 422 || (await (async () => {
-        if (!extractRes.ok) return false
-        const d = await extractRes.clone().json().catch(() => ({}))
-        return !d.text?.trim()
-      })())) {
+      // Read response once
+      const extractData = await extractRes.json().catch(() => ({}))
+      const isScanned = extractRes.status === 422 || !extractData.text?.trim()
+
+      if (isScanned) {
         // Scanned / image-only PDF — run OCR via Groq vision automatically
-        setParseStatus("Scanned PDF detected — running OCR with Groq vision…")
+        setParseStatus("Scanned PDF detected — running OCR with AI vision…")
         try {
           const images = await renderPdfAsImages(file)
-          if (!images.length) throw new Error("No pages rendered")
+          if (!images.length) throw new Error("No pages rendered from PDF")
 
           const ocrRes = await fetch("/api/ocr-resume", {
             method: "POST",
             headers: { "Content-Type": "application/json", "x-groq-key": apiKeys.groq },
             body: JSON.stringify({ images }),
           })
-          if (!ocrRes.ok) {
-            const body = await ocrRes.text().catch(() => "")
-            throw new Error(`OCR API error ${ocrRes.status}: ${body.slice(0, 150)}`)
-          }
-          const parsed = await ocrRes.json()
-          if (parsed.error) throw new Error(parsed.error)
-          applyParsed(parsed)
+          const ocrData = await ocrRes.json().catch(() => ({}))
+          if (!ocrRes.ok || ocrData.error) throw new Error(ocrData.error ?? `OCR API ${ocrRes.status}`)
+          applyParsed(ocrData)
           setStep("review")
           return
         } catch (ocrErr) {
           console.error("OCR failed:", ocrErr)
-          // Last resort: paste mode
+          const msg = ocrErr instanceof Error ? ocrErr.message : String(ocrErr)
           setPasteMode(true)
-          setParseError("OCR failed — please paste your resume text below.")
+          setParseError(`OCR failed (${msg.slice(0, 120)}). Please paste your resume text below.`)
           setStep("upload")
           return
         }
@@ -162,15 +158,7 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
         return
       }
 
-      const extractData = await extractRes.json()
       text = extractData.text ?? ""
-
-      if (!text.trim()) {
-        setPasteMode(true)
-        setParseError("No text found in the PDF. Please paste your resume text instead.")
-        setStep("upload")
-        return
-      }
     } catch (e) {
       console.error("extraction error:", e)
       setPasteMode(true)
