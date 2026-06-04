@@ -50,33 +50,47 @@ const APIFY_PLATFORMS: { id: string; label: string; flag: string }[] = [
 
 // ─── Match scoring (0-100) ────────────────────────────────────────────────────
 function computeMatch(job: Job, prefs: UserPreferences): number {
-  const text = `${job.title} ${job.tags.join(" ")} ${job.company}`.toLowerCase()
+  const text = `${job.title} ${job.tags.join(" ")} ${job.company} ${job.location}`.toLowerCase()
   const userSkills = prefs.skills.map((s) => s.toLowerCase())
   const userRoles  = prefs.roles.map((r) => r.toLowerCase())
 
-  // Role match — 0-40 pts
+  // Role match — 0-35 pts
   const roleHits = userRoles.filter((r) => text.includes(r)).length
-  const roleScore = Math.min(40, roleHits * (40 / Math.max(userRoles.length, 1)))
+  const roleScore = Math.min(35, roleHits * (35 / Math.max(userRoles.length, 1)))
 
-  // Skill match — 0-40 pts
+  // Skill match — 0-40 pts (most important signal)
   const skillHits = userSkills.filter((s) => text.includes(s)).length
   const skillScore = userSkills.length
-    ? Math.min(40, (skillHits / userSkills.length) * 40)
-    : 20 // neutral if no skills set
+    ? Math.min(40, (skillHits / Math.min(userSkills.length, 10)) * 40)
+    : 20
 
-  // Work type match — 0-20 pts
+  // Work type match — 0-15 pts
   const wantAny = prefs.workTypes.includes("any")
   const jt = job.type.toLowerCase()
   let workScore = 0
   if (wantAny) {
-    workScore = 20
+    workScore = 15
   } else {
-    if (prefs.workTypes.includes("remote")   && jt.includes("remote"))   workScore = 20
-    if (prefs.workTypes.includes("contract") && (jt.includes("contract") || jt.includes("freelance"))) workScore = 20
-    if (prefs.workTypes.includes("fulltime") && (jt.includes("full") || jt.includes("permanent")))     workScore = 20
+    if (prefs.workTypes.includes("remote")   && jt.includes("remote"))   workScore = 15
+    if (prefs.workTypes.includes("contract") && (jt.includes("contract") || jt.includes("freelance"))) workScore = 15
+    if (prefs.workTypes.includes("fulltime") && (jt.includes("full") || jt.includes("permanent")))     workScore = 15
   }
 
-  return Math.round(roleScore + skillScore + workScore)
+  // Seniority match — 0-10 pts
+  const sen = prefs.seniority ?? "mid"
+  const titleLower = job.title.toLowerCase()
+  let senScore = 5 // neutral default
+  if (sen === "fresher" || sen === "junior") {
+    if (titleLower.includes("junior") || titleLower.includes("entry") || titleLower.includes("associate")) senScore = 10
+    if (titleLower.includes("senior") || titleLower.includes("lead") || titleLower.includes("principal")) senScore = 0
+  } else if (sen === "senior" || sen === "lead") {
+    if (titleLower.includes("senior") || titleLower.includes("lead") || titleLower.includes("staff") || titleLower.includes("principal")) senScore = 10
+    if (titleLower.includes("junior") || titleLower.includes("entry")) senScore = 0
+  } else {
+    senScore = 5 // mid-level matches most things
+  }
+
+  return Math.round(roleScore + skillScore + workScore + senScore)
 }
 
 function MatchBadge({ score }: { score: number }) {
@@ -261,21 +275,20 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
 
       {/* Preferences bar */}
       <div className="flex items-center gap-2 flex-wrap text-sm">
-        <span className="text-muted-foreground text-xs">Filtering for:</span>
-        {preferences.roles.map((r) => (
+        <span className="text-muted-foreground text-xs">Profile:</span>
+        {preferences.roles.slice(0, 3).map((r) => (
           <Badge key={r} variant="secondary" className="text-xs">{r}</Badge>
         ))}
+        <Badge variant="outline" className="text-xs capitalize">{preferences.seniority ?? "mid"}</Badge>
+        {preferences.experienceYears != null && (
+          <span className="text-xs text-muted-foreground">{preferences.experienceYears}yr exp</span>
+        )}
         {preferences.workTypes.map((wt) => (
           <Badge key={wt} variant="outline" className="text-xs capitalize">{wt}</Badge>
         ))}
-        {preferences.skills.slice(0, 5).map((s) => (
-          <span key={s} className="text-xs text-muted-foreground font-mono">{s}</span>
-        ))}
-        {preferences.skills.length > 5 && (
-          <span className="text-xs text-muted-foreground">+{preferences.skills.length - 5} skills</span>
-        )}
+        <span className="text-xs text-muted-foreground">{preferences.skills.length} skills</span>
         <button onClick={onEditPrefs} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors ml-auto">
-          <SlidersHorizontal size={12} /> Edit
+          <SlidersHorizontal size={12} /> Edit profile
         </button>
       </div>
 

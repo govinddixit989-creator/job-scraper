@@ -2,6 +2,8 @@ export type JobStatus = "new" | "saved" | "applied" | "skipped"
 
 export type WorkType = "remote" | "contract" | "fulltime" | "any"
 
+export type Seniority = "fresher" | "junior" | "mid" | "senior" | "lead"
+
 export type JobSource =
   | "remoteok"
   | "weworkremotely"
@@ -28,12 +30,13 @@ export interface Job {
   status: JobStatus
 }
 
-export type WorkType2 = WorkType
-
 export interface UserPreferences {
   roles: string[]
   skills: string[]
   workTypes: WorkType[]
+  experienceYears: number
+  seniority: Seniority
+  salaryExpectation?: string   // e.g. "$3000/mo" or "₹15 LPA"
   resumeText?: string
   resumeName?: string
 }

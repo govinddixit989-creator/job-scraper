@@ -1,19 +1,12 @@
 "use client"
 
 import { useState, useRef } from "react"
-import { UserPreferences, WorkType, ApiKeys } from "@/lib/types"
+import { UserPreferences, WorkType, Seniority, ApiKeys } from "@/lib/types"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import {
-  FileText,
-  X,
-  Plus,
-  Upload,
-  CheckCircle2,
-  Briefcase,
-  Cpu,
-  ArrowRight,
-  Loader2,
+  Upload, CheckCircle2, Loader2, X, Plus,
+  FileText, Pencil, ArrowRight, Sparkles,
 } from "lucide-react"
 
 interface Props {
@@ -21,84 +14,120 @@ interface Props {
   apiKeys: ApiKeys
 }
 
-const WORK_TYPE_OPTIONS: { value: WorkType; label: string; desc: string }[] = [
-  { value: "remote", label: "Remote", desc: "Work from anywhere" },
-  { value: "fulltime", label: "Full-time", desc: "Permanent role" },
-  { value: "contract", label: "Contract", desc: "Fixed term / freelance" },
-  { value: "any", label: "Any", desc: "Show everything" },
-]
-
-const SUGGESTED_ROLES = [
-  "Frontend Developer", "Backend Developer", "Full Stack Developer",
-  "React Developer", "Node.js Developer", "Python Developer",
-  "DevOps Engineer", "Data Engineer", "Mobile Developer",
-]
-
-const SUGGESTED_SKILLS = [
-  "React", "TypeScript", "Node.js", "Python", "Next.js",
-  "PostgreSQL", "Docker", "AWS", "GraphQL", "Go",
-]
-
-async function extractPdfText(file: File): Promise<string> {
-  // Dynamically import pdfjs to avoid SSR issues
-  const pdfjsLib = await import("pdfjs-dist")
-  pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`
-
-  const arrayBuffer = await file.arrayBuffer()
-  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise
-  let text = ""
-  for (let i = 1; i <= pdf.numPages; i++) {
-    const page = await pdf.getPage(i)
-    const content = await page.getTextContent()
-    text += content.items.map((item) => ("str" in item ? item.str : "")).join(" ") + "\n"
+// ─── PDF extractor ────────────────────────────────────────────────────────────
+async function extractText(file: File): Promise<string> {
+  if (file.name.endsWith(".pdf") || file.type === "application/pdf") {
+    const pdfjsLib = await import("pdfjs-dist")
+    pdfjsLib.GlobalWorkerOptions.workerSrc =
+      `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`
+    const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+    let text = ""
+    for (let i = 1; i <= pdf.numPages; i++) {
+      const page = await pdf.getPage(i)
+      const content = await page.getTextContent()
+      text += content.items.map((item) => ("str" in item ? item.str : "")).join(" ") + "\n"
+    }
+    return text
   }
-  return text
+  return file.text()
 }
 
-function extractSkillsFromText(text: string, knownSkills: string[]): string[] {
-  const lower = text.toLowerCase()
-  const found = knownSkills.filter((s) => lower.includes(s.toLowerCase()))
-  // Also pull capitalised words that look like tech (2-20 chars, no spaces)
-  const techPattern = /\b[A-Z][a-zA-Z.+#]{1,19}\b/g
-  const extras = [...new Set(text.match(techPattern) ?? [])]
-    .filter((w) => w.length > 2 && !["The", "And", "For", "With", "From", "This", "That"].includes(w))
-    .slice(0, 20)
-  return [...new Set([...found, ...extras])]
-}
-
-const ALL_KNOWN_SKILLS = [
-  "React", "TypeScript", "JavaScript", "Node.js", "Python", "Go", "Rust",
-  "Java", "Kotlin", "Swift", "Next.js", "Vue", "Angular", "Svelte",
-  "PostgreSQL", "MySQL", "MongoDB", "Redis", "Elasticsearch",
-  "Docker", "Kubernetes", "AWS", "GCP", "Azure", "Terraform",
-  "GraphQL", "REST", "gRPC", "Kafka", "RabbitMQ",
-  "Django", "FastAPI", "Flask", "Express", "NestJS",
-  "React Native", "Flutter", "Android", "iOS",
+const SENIORITY_OPTIONS: { value: Seniority; label: string; years: string }[] = [
+  { value: "fresher", label: "Fresher",       years: "0 years" },
+  { value: "junior",  label: "Junior",         years: "1–2 years" },
+  { value: "mid",     label: "Mid-level",      years: "3–5 years" },
+  { value: "senior",  label: "Senior",         years: "6–9 years" },
+  { value: "lead",    label: "Lead / Staff",   years: "10+ years" },
 ]
+
+const WORK_TYPES: { value: WorkType; label: string }[] = [
+  { value: "remote",   label: "Remote" },
+  { value: "fulltime", label: "Full-time" },
+  { value: "contract", label: "Contract" },
+  { value: "any",      label: "Any" },
+]
+
+type Step = "upload" | "parsing" | "review"
 
 export default function Onboarding({ onComplete, apiKeys }: Props) {
-  const [step, setStep] = useState(0)
-  const [roles, setRoles] = useState<string[]>([])
-  const [roleInput, setRoleInput] = useState("")
-  const [skills, setSkills] = useState<string[]>([])
-  const [skillInput, setSkillInput] = useState("")
-  const [workTypes, setWorkTypes] = useState<WorkType[]>(["remote"])
-  const [resumeText, setResumeText] = useState("")
-  const [resumeName, setResumeFileName] = useState("")
-  const [parsing, setParsing] = useState(false)
+  const [step, setStep] = useState<Step>("upload")
   const [parseError, setParseError] = useState("")
+  const [rawText, setRawText] = useState("")
+  const [fileName, setFileName] = useState("")
+  const [summary, setSummary] = useState("")
+
+  // Editable parsed fields
+  const [roles, setRoles] = useState<string[]>([])
+  const [skills, setSkills] = useState<string[]>([])
+  const [workTypes, setWorkTypes] = useState<WorkType[]>(["remote"])
+  const [seniority, setSeniority] = useState<Seniority>("mid")
+  const [experienceYears, setExperienceYears] = useState(0)
+  const [salary, setSalary] = useState("")
+
+  // Inline add inputs
+  const [roleInput, setRoleInput] = useState("")
+  const [skillInput, setSkillInput] = useState("")
+
   const fileRef = useRef<HTMLInputElement>(null)
 
-  // ── Step 0: Roles ──────────────────────────────────────────────────────────
-  const addRole = (r: string) => {
-    const trimmed = r.trim()
-    if (trimmed && !roles.includes(trimmed)) setRoles((p) => [...p, trimmed])
-    setRoleInput("")
+  // ── File processing ──────────────────────────────────────────────────────────
+  const processFile = async (file: File) => {
+    setParseError("")
+    setFileName(file.name)
+    setStep("parsing")
+
+    try {
+      const text = await extractText(file)
+      setRawText(text)
+
+      const res = await fetch("/api/parse-resume", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-groq-key": apiKeys.groq },
+        body: JSON.stringify({ text }),
+      })
+
+      if (!res.ok) throw new Error(await res.text())
+      const parsed = await res.json()
+
+      // Populate all fields from AI response
+      setRoles(parsed.roles ?? [])
+      setSkills([
+        ...new Set([...(parsed.skills ?? [])]),
+      ])
+      setSeniority(parsed.seniority ?? "mid")
+      setExperienceYears(parsed.experience_years ?? 0)
+      setSummary(parsed.summary ?? "")
+      setSalary(parsed.salary_expectation ?? "")
+
+      const wt: WorkType[] = parsed.work_type_preference?.length
+        ? parsed.work_type_preference
+        : ["remote"]
+      setWorkTypes(wt)
+
+      setStep("review")
+    } catch (e) {
+      setParseError(`Could not parse resume: ${String(e).slice(0, 120)}`)
+      setStep("upload")
+    }
   }
 
-  const removeRole = (r: string) => setRoles((p) => p.filter((x) => x !== r))
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    const file = e.dataTransfer.files[0]
+    if (file) processFile(file)
+  }
 
-  // ── Step 1: Work type ──────────────────────────────────────────────────────
+  // ── Chip helpers ─────────────────────────────────────────────────────────────
+  const addRole = (v: string) => {
+    const t = v.trim()
+    if (t && !roles.includes(t)) setRoles((p) => [...p, t])
+    setRoleInput("")
+  }
+  const addSkill = (v: string) => {
+    const t = v.trim()
+    if (t && !skills.includes(t)) setSkills((p) => [...p, t])
+    setSkillInput("")
+  }
   const toggleWorkType = (wt: WorkType) => {
     if (wt === "any") { setWorkTypes(["any"]); return }
     setWorkTypes((prev) => {
@@ -107,345 +136,274 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
     })
   }
 
-  // ── Step 2: Skills ─────────────────────────────────────────────────────────
-  const addSkill = (s: string) => {
-    const trimmed = s.trim()
-    if (trimmed && !skills.includes(trimmed)) setSkills((p) => [...p, trimmed])
-    setSkillInput("")
-  }
-
-  const removeSkill = (s: string) => setSkills((p) => p.filter((x) => x !== s))
-
-  // ── Step 3: Resume ─────────────────────────────────────────────────────────
-  const handleFile = async (file: File) => {
-    setParseError("")
-    setParsing(true)
-    setResumeFileName(file.name)
-    try {
-      // Extract raw text client-side
-      let text = ""
-      if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
-        text = await extractPdfText(file)
-      } else {
-        text = await file.text()
-      }
-      setResumeText(text)
-
-      // Use Groq AI to parse resume properly
-      const res = await fetch("/api/parse-resume", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-groq-key": apiKeys.groq,
-        },
-        body: JSON.stringify({ text }),
-      })
-
-      if (res.ok) {
-        const parsed = await res.json()
-        // Merge AI-extracted skills + roles into user's profile
-        const aiSkills: string[] = [...(parsed.skills ?? []), ...(parsed.technologies ?? [])]
-        const aiRoles: string[] = parsed.roles ?? []
-        setSkills((prev) => [...new Set([...prev, ...aiSkills])])
-        if (aiRoles.length > 0 && roles.length === 0) {
-          setRoles(aiRoles.slice(0, 3))
-        }
-      } else {
-        // Fallback to heuristic extraction
-        const detected = extractSkillsFromText(text, ALL_KNOWN_SKILLS)
-        setSkills((prev) => [...new Set([...prev, ...detected])])
-      }
-    } catch {
-      setParseError("Could not read file. Try a plain PDF or paste your skills manually.")
-    } finally {
-      setParsing(false)
-    }
-  }
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault()
-    const file = e.dataTransfer.files[0]
-    if (file) handleFile(file)
-  }
-
-  // ── Finish ─────────────────────────────────────────────────────────────────
-  const finish = () => {
+  // ── Submit ────────────────────────────────────────────────────────────────────
+  const handleSubmit = () => {
     onComplete({
       roles,
       skills,
       workTypes: workTypes.length ? workTypes : ["any"],
-      resumeText: resumeText || undefined,
-      resumeName: resumeName || undefined,
+      experienceYears,
+      seniority,
+      salaryExpectation: salary || undefined,
+      resumeText: rawText || undefined,
+      resumeName: fileName || undefined,
     })
   }
 
-  const canNext = [
-    roles.length > 0,
-    workTypes.length > 0,
-    skills.length > 0,
-    true, // resume is optional
-  ]
-
-  const STEPS = ["Roles", "Work type", "Skills", "Resume"]
-
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-background p-4">
-      <div className="w-full max-w-lg">
-
-        {/* Progress bar */}
-        <div className="flex gap-1.5 mb-10">
-          {STEPS.map((s, i) => (
-            <div key={s} className="flex-1 flex flex-col gap-1">
-              <div className={`h-1 rounded-full transition-all duration-300 ${i <= step ? "bg-primary" : "bg-muted"}`} />
-              <span className={`text-[10px] ${i === step ? "text-foreground" : "text-muted-foreground"}`}>{s}</span>
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Step: Upload
+  // ─────────────────────────────────────────────────────────────────────────────
+  if (step === "upload") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+        <div className="w-full max-w-md space-y-6">
+          <div className="text-center space-y-2">
+            <div className="w-12 h-12 bg-primary rounded-2xl flex items-center justify-center mx-auto">
+              <FileText size={22} className="text-primary-foreground" />
             </div>
-          ))}
+            <h1 className="text-2xl font-bold">Upload your resume</h1>
+            <p className="text-muted-foreground text-sm leading-relaxed">
+              We'll parse it with AI and auto-fill your profile — roles, skills, experience, everything.
+              No manual typing.
+            </p>
+          </div>
+
+          <div
+            onDrop={handleDrop}
+            onDragOver={(e) => e.preventDefault()}
+            onClick={() => fileRef.current?.click()}
+            className="border-2 border-dashed border-border hover:border-primary/50 rounded-xl p-14 flex flex-col items-center gap-3 cursor-pointer hover:bg-muted/30 transition-colors"
+          >
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".pdf,.docx,.txt"
+              className="hidden"
+              onChange={(e) => e.target.files?.[0] && processFile(e.target.files[0])}
+            />
+            <Upload size={32} className="text-muted-foreground" />
+            <div className="text-center">
+              <p className="font-medium">Drop your resume here</p>
+              <p className="text-sm text-muted-foreground mt-1">PDF, DOCX, or TXT · Stored only in your browser</p>
+            </div>
+          </div>
+
+          {parseError && (
+            <p className="text-sm text-destructive text-center">{parseError}</p>
+          )}
+
+          <p className="text-xs text-center text-muted-foreground">
+            Powered by Groq Llama 3 · Your resume never leaves your browser except to Groq's API
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Step: Parsing
+  // ─────────────────────────────────────────────────────────────────────────────
+  if (step === "parsing") {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background p-4">
+        <div className="flex flex-col items-center gap-6 text-center">
+          <div className="relative">
+            <div className="w-16 h-16 rounded-full border-4 border-muted flex items-center justify-center">
+              <Sparkles size={24} className="text-primary" />
+            </div>
+            <Loader2 size={64} className="animate-spin text-primary absolute inset-0 opacity-20" />
+          </div>
+          <div>
+            <p className="font-semibold text-lg">Reading your resume…</p>
+            <p className="text-muted-foreground text-sm mt-1">
+              Groq AI is extracting your skills, experience, and roles
+            </p>
+            <p className="text-xs text-muted-foreground mt-1">{fileName}</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // Step: Review
+  // ─────────────────────────────────────────────────────────────────────────────
+  return (
+    <div className="min-h-screen bg-background">
+      <div className="max-w-2xl mx-auto px-4 py-10 space-y-8">
+
+        {/* Header */}
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <CheckCircle2 size={20} className="text-green-500" />
+            <h1 className="text-xl font-bold">Resume parsed — review your profile</h1>
+          </div>
+          {summary && <p className="text-sm text-muted-foreground leading-relaxed">{summary}</p>}
+          <p className="text-xs text-muted-foreground flex items-center gap-1.5">
+            <FileText size={12} /> {fileName}
+            <button
+              onClick={() => setStep("upload")}
+              className="underline hover:no-underline ml-1"
+            >
+              Replace
+            </button>
+          </p>
         </div>
 
-        {/* ── Step 0: Roles ── */}
-        {step === 0 && (
-          <div className="space-y-6">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <Briefcase size={18} className="text-primary" />
-                <h2 className="text-2xl font-bold">What roles are you looking for?</h2>
-              </div>
-              <p className="text-muted-foreground text-sm">Add one or more job titles you want to find.</p>
-            </div>
-
-            <div className="flex gap-2">
+        {/* Experience */}
+        <section className="space-y-3">
+          <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">Experience</h2>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Years of experience</label>
               <Input
-                placeholder="e.g. React Developer"
+                type="number"
+                min={0}
+                max={40}
+                value={experienceYears}
+                onChange={(e) => setExperienceYears(Number(e.target.value))}
+                className="h-9 w-28"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">Level</label>
+              <div className="flex flex-wrap gap-2">
+                {SENIORITY_OPTIONS.map(({ value, label, years }) => (
+                  <button
+                    key={value}
+                    onClick={() => setSeniority(value)}
+                    className={`px-3 py-1.5 rounded-lg border text-sm transition-all ${
+                      seniority === value
+                        ? "border-primary bg-primary/10 text-primary font-medium"
+                        : "border-border hover:border-muted-foreground/40"
+                    }`}
+                    title={years}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* Target Roles */}
+        <section className="space-y-3">
+          <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">
+            Target roles <span className="text-xs font-normal normal-case">(what to search for)</span>
+          </h2>
+          <div className="flex flex-wrap gap-2">
+            {roles.map((r) => (
+              <span key={r} className="flex items-center gap-1 px-3 py-1 bg-primary/10 text-primary rounded-full text-sm font-medium">
+                {r}
+                <button onClick={() => setRoles((p) => p.filter((x) => x !== r))} className="hover:text-destructive ml-0.5">
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+            <div className="flex items-center gap-1">
+              <Input
+                placeholder="Add role…"
                 value={roleInput}
                 onChange={(e) => setRoleInput(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && roleInput.trim() && addRole(roleInput)}
-                className="flex-1"
-                autoFocus
+                className="h-8 w-36 text-sm"
               />
               <button
                 onClick={() => addRole(roleInput)}
                 disabled={!roleInput.trim()}
-                className="px-3 py-2 bg-primary text-primary-foreground rounded-md disabled:opacity-40 hover:opacity-90 transition-opacity"
+                className="h-8 w-8 flex items-center justify-center rounded-md border hover:bg-muted disabled:opacity-40"
               >
-                <Plus size={16} />
+                <Plus size={14} />
               </button>
             </div>
-
-            {roles.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {roles.map((r) => (
-                  <span key={r} className="flex items-center gap-1 px-3 py-1 bg-primary/10 text-primary rounded-full text-sm font-medium">
-                    {r}
-                    <button onClick={() => removeRole(r)} className="hover:text-destructive"><X size={12} /></button>
-                  </span>
-                ))}
-              </div>
-            )}
-
-            <div>
-              <p className="text-xs text-muted-foreground mb-2">Suggestions</p>
-              <div className="flex flex-wrap gap-2">
-                {SUGGESTED_ROLES.filter((r) => !roles.includes(r)).map((r) => (
-                  <button
-                    key={r}
-                    onClick={() => addRole(r)}
-                    className="px-3 py-1 border rounded-full text-sm hover:bg-muted transition-colors"
-                  >
-                    {r}
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
-        )}
+        </section>
 
-        {/* ── Step 1: Work type ── */}
-        {step === 1 && (
-          <div className="space-y-6">
-            <div>
-              <h2 className="text-2xl font-bold mb-1">How do you want to work?</h2>
-              <p className="text-muted-foreground text-sm">Select all that apply.</p>
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              {WORK_TYPE_OPTIONS.map(({ value, label, desc }) => {
-                const active = workTypes.includes(value)
-                return (
-                  <button
-                    key={value}
-                    onClick={() => toggleWorkType(value)}
-                    className={`flex flex-col items-start gap-1 p-4 rounded-xl border-2 transition-all text-left ${
-                      active ? "border-primary bg-primary/5" : "border-border hover:border-muted-foreground/40"
-                    }`}
-                  >
-                    <div className="flex items-center justify-between w-full">
-                      <span className="font-semibold">{label}</span>
-                      {active && <CheckCircle2 size={16} className="text-primary" />}
-                    </div>
-                    <span className="text-xs text-muted-foreground">{desc}</span>
-                  </button>
-                )
-              })}
-            </div>
+        {/* Skills */}
+        <section className="space-y-3">
+          <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">
+            Skills & technologies <span className="text-xs font-normal normal-case">({skills.length} detected)</span>
+          </h2>
+          <div className="flex flex-wrap gap-1.5 max-h-44 overflow-y-auto">
+            {skills.map((s) => (
+              <span key={s} className="flex items-center gap-1 px-2 py-0.5 bg-muted rounded-md text-xs font-mono">
+                {s}
+                <button onClick={() => setSkills((p) => p.filter((x) => x !== s))} className="hover:text-destructive">
+                  <X size={10} />
+                </button>
+              </span>
+            ))}
           </div>
-        )}
-
-        {/* ── Step 2: Skills ── */}
-        {step === 2 && (
-          <div className="space-y-6">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <Cpu size={18} className="text-primary" />
-                <h2 className="text-2xl font-bold">Your tech stack</h2>
-              </div>
-              <p className="text-muted-foreground text-sm">Jobs are filtered and sorted by these. Add your core skills.</p>
-            </div>
-
-            <div className="flex gap-2">
-              <Input
-                placeholder="e.g. React, Python…"
-                value={skillInput}
-                onChange={(e) => setSkillInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && skillInput.trim()) addSkill(skillInput)
-                  if (e.key === "," && skillInput.trim()) { e.preventDefault(); addSkill(skillInput) }
-                }}
-                autoFocus
-              />
-              <button
-                onClick={() => addSkill(skillInput)}
-                disabled={!skillInput.trim()}
-                className="px-3 py-2 bg-primary text-primary-foreground rounded-md disabled:opacity-40 hover:opacity-90 transition-opacity"
-              >
-                <Plus size={16} />
-              </button>
-            </div>
-
-            {skills.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {skills.map((s) => (
-                  <span key={s} className="flex items-center gap-1 px-2.5 py-1 bg-primary/10 text-primary rounded-full text-sm font-mono">
-                    {s}
-                    <button onClick={() => removeSkill(s)} className="hover:text-destructive"><X size={11} /></button>
-                  </span>
-                ))}
-              </div>
-            )}
-
-            <div>
-              <p className="text-xs text-muted-foreground mb-2">Quick add</p>
-              <div className="flex flex-wrap gap-2">
-                {SUGGESTED_SKILLS.filter((s) => !skills.includes(s)).map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => addSkill(s)}
-                    className="px-2.5 py-1 border rounded-full text-sm font-mono hover:bg-muted transition-colors"
-                  >
-                    {s}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ── Step 3: Resume ── */}
-        {step === 3 && (
-          <div className="space-y-6">
-            <div>
-              <div className="flex items-center gap-2 mb-1">
-                <FileText size={18} className="text-primary" />
-                <h2 className="text-2xl font-bold">Upload your resume</h2>
-              </div>
-              <p className="text-muted-foreground text-sm">
-                Optional — we'll extract your skills to improve job filtering. Stored only in your browser.
-              </p>
-            </div>
-
-            <div
-              onDrop={handleDrop}
-              onDragOver={(e) => e.preventDefault()}
-              onClick={() => fileRef.current?.click()}
-              className={`border-2 border-dashed rounded-xl p-10 flex flex-col items-center gap-3 cursor-pointer transition-colors ${
-                resumeName ? "border-primary/40 bg-primary/5" : "border-border hover:border-muted-foreground/40 hover:bg-muted/30"
-              }`}
-            >
-              <input
-                ref={fileRef}
-                type="file"
-                accept=".pdf,.docx,.txt"
-                className="hidden"
-                onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
-              />
-              {parsing ? (
-                <>
-                  <Loader2 size={28} className="animate-spin text-primary" />
-                  <p className="text-sm text-muted-foreground">Reading resume…</p>
-                </>
-              ) : resumeName ? (
-                <>
-                  <CheckCircle2 size={28} className="text-green-500" />
-                  <p className="text-sm font-medium">{resumeName}</p>
-                  <p className="text-xs text-muted-foreground">Skills extracted and merged into your profile</p>
-                </>
-              ) : (
-                <>
-                  <Upload size={28} className="text-muted-foreground" />
-                  <p className="text-sm text-muted-foreground">Drag & drop or click to upload</p>
-                  <p className="text-xs text-muted-foreground">PDF, DOCX, or TXT</p>
-                </>
-              )}
-            </div>
-
-            {parseError && <p className="text-sm text-destructive">{parseError}</p>}
-
-            {skills.length > 0 && (
-              <div>
-                <p className="text-xs text-muted-foreground mb-2">Skills detected from resume</p>
-                <div className="flex flex-wrap gap-2">
-                  {skills.slice(0, 20).map((s) => (
-                    <Badge key={s} variant="secondary" className="font-mono text-xs">{s}</Badge>
-                  ))}
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* Navigation */}
-        <div className="flex items-center justify-between mt-10">
-          {step > 0 ? (
+          <div className="flex items-center gap-1">
+            <Input
+              placeholder="Add skill…"
+              value={skillInput}
+              onChange={(e) => setSkillInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && skillInput.trim()) addSkill(skillInput)
+                if (e.key === "," && skillInput.trim()) { e.preventDefault(); addSkill(skillInput) }
+              }}
+              className="h-8 w-36 text-sm font-mono"
+            />
             <button
-              onClick={() => setStep((s) => s - 1)}
-              className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+              onClick={() => addSkill(skillInput)}
+              disabled={!skillInput.trim()}
+              className="h-8 w-8 flex items-center justify-center rounded-md border hover:bg-muted disabled:opacity-40"
             >
-              ← Back
+              <Plus size={14} />
             </button>
-          ) : <span />}
+          </div>
+        </section>
 
-          {step < STEPS.length - 1 ? (
-            <button
-              onClick={() => setStep((s) => s + 1)}
-              disabled={!canNext[step]}
-              className="flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium disabled:opacity-40 hover:opacity-90 transition-opacity"
-            >
-              Continue <ArrowRight size={15} />
-            </button>
-          ) : (
-            <button
-              onClick={finish}
-              disabled={parsing}
-              className="flex items-center gap-2 px-5 py-2.5 bg-primary text-primary-foreground rounded-lg font-medium hover:opacity-90 transition-opacity"
-            >
-              Find my jobs <ArrowRight size={15} />
-            </button>
+        {/* Work type */}
+        <section className="space-y-3">
+          <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">Work preference</h2>
+          <div className="flex flex-wrap gap-2">
+            {WORK_TYPES.map(({ value, label }) => {
+              const active = workTypes.includes(value)
+              return (
+                <button
+                  key={value}
+                  onClick={() => toggleWorkType(value)}
+                  className={`flex items-center gap-1.5 px-4 py-2 rounded-lg border-2 text-sm transition-all ${
+                    active ? "border-primary bg-primary/5 font-medium" : "border-border hover:border-muted-foreground/40"
+                  }`}
+                >
+                  {active && <CheckCircle2 size={13} className="text-primary" />}
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+        </section>
+
+        {/* Salary expectation */}
+        <section className="space-y-3">
+          <h2 className="font-semibold text-sm uppercase tracking-wide text-muted-foreground">
+            Salary expectation <span className="text-xs font-normal normal-case">(optional — used to filter jobs)</span>
+          </h2>
+          <Input
+            placeholder="e.g. $4000/mo or ₹20 LPA"
+            value={salary}
+            onChange={(e) => setSalary(e.target.value)}
+            className="h-9 max-w-xs"
+          />
+        </section>
+
+        {/* Submit */}
+        <div className="pt-2">
+          <button
+            onClick={handleSubmit}
+            disabled={roles.length === 0 || skills.length === 0}
+            className="flex items-center gap-2 px-6 py-3 bg-primary text-primary-foreground rounded-lg font-medium disabled:opacity-40 hover:opacity-90 transition-opacity"
+          >
+            Find my jobs <ArrowRight size={16} />
+          </button>
+          {(roles.length === 0 || skills.length === 0) && (
+            <p className="text-xs text-muted-foreground mt-2">Add at least one role and one skill to continue</p>
           )}
         </div>
-
-        {step === 3 && (
-          <button onClick={finish} className="w-full text-center text-xs text-muted-foreground mt-4 hover:text-foreground transition-colors">
-            Skip for now
-          </button>
-        )}
       </div>
     </div>
   )
