@@ -13,27 +13,6 @@ interface Props {
   apiKeys: ApiKeys
 }
 
-// ─── Render PDF pages as base64 images (browser-side, canvas is available) ───
-async function renderPdfAsImages(file: File, maxPages = 4): Promise<string[]> {
-  const pdfjsLib = await import("pdfjs-dist")
-  pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs"
-
-  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
-  const images: string[] = []
-  const pages = Math.min(pdf.numPages, maxPages)
-
-  for (let i = 1; i <= pages; i++) {
-    const page = await pdf.getPage(i)
-    const viewport = page.getViewport({ scale: 2.0 }) // 2× for readable OCR
-    const canvas = document.createElement("canvas")
-    canvas.width = viewport.width
-    canvas.height = viewport.height
-    const ctx = canvas.getContext("2d")!
-    await page.render({ canvasContext: ctx, canvas, viewport }).promise
-    images.push(canvas.toDataURL("image/jpeg", 0.85))
-  }
-  return images
-}
 
 const SENIORITY_OPTIONS: { value: Seniority; label: string; years: string }[] = [
   { value: "fresher", label: "Fresher",     years: "0 years" },
@@ -119,41 +98,32 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
       formData.append("file", file)
       const extractRes = await fetch("/api/extract-text", { method: "POST", body: formData })
 
-      // Read response once
       const extractData = await extractRes.json().catch(() => ({}))
-      const isScanned = extractRes.status === 422 || !extractData.text?.trim()
-
-      if (isScanned) {
-        // Scanned / image-only PDF — run OCR via Groq vision automatically
-        setParseStatus("Scanned PDF detected — running OCR with AI vision…")
-        try {
-          const images = await renderPdfAsImages(file)
-          if (!images.length) throw new Error("No pages rendered from PDF")
-
-          const ocrRes = await fetch("/api/ocr-resume", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "x-groq-key": apiKeys.groq },
-            body: JSON.stringify({ images }),
-          })
-          const ocrData = await ocrRes.json().catch(() => ({}))
-          if (!ocrRes.ok || ocrData.error) throw new Error(ocrData.error ?? `OCR API ${ocrRes.status}`)
-          applyParsed(ocrData)
-          setStep("review")
-          return
-        } catch (ocrErr) {
-          console.error("OCR failed:", ocrErr)
-          const msg = ocrErr instanceof Error ? ocrErr.message : String(ocrErr)
-          setPasteMode(true)
-          setParseError(`OCR failed (${msg.slice(0, 120)}). Please paste your resume text below.`)
-          setStep("upload")
-          return
-        }
-      }
 
       if (!extractRes.ok) {
         setPasteMode(true)
-        setParseError(`Could not read file (${extractRes.status}). Please paste your resume text instead.`)
+        setParseError(extractData.error ?? "Could not read this PDF. Please paste your resume text instead.")
         setStep("upload")
+        return
+      }
+
+      if (extractData.type === "images") {
+        // Server extracted embedded images — send to OCR
+        setParseStatus("Scanned PDF — running AI vision OCR…")
+        const ocrRes = await fetch("/api/ocr-resume", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "x-groq-key": apiKeys.groq },
+          body: JSON.stringify({ images: extractData.images }),
+        })
+        const ocrData = await ocrRes.json().catch(() => ({}))
+        if (!ocrRes.ok || ocrData.error) {
+          setPasteMode(true)
+          setParseError(`OCR failed: ${ocrData.error ?? ocrRes.status}. Please paste your resume text.`)
+          setStep("upload")
+          return
+        }
+        applyParsed(ocrData)
+        setStep("review")
         return
       }
 
