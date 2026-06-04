@@ -16,8 +16,7 @@ interface Props {
 // ─── Render PDF pages as base64 images (browser-side, canvas is available) ───
 async function renderPdfAsImages(file: File, maxPages = 4): Promise<string[]> {
   const pdfjsLib = await import("pdfjs-dist")
-  pdfjsLib.GlobalWorkerOptions.workerSrc =
-    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`
+  pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.min.mjs"
 
   const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
   const images: string[] = []
