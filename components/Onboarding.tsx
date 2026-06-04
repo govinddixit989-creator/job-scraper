@@ -13,6 +13,29 @@ interface Props {
   apiKeys: ApiKeys
 }
 
+// ─── Render PDF pages as base64 images (browser-side, canvas is available) ───
+async function renderPdfAsImages(file: File, maxPages = 4): Promise<string[]> {
+  const pdfjsLib = await import("pdfjs-dist")
+  pdfjsLib.GlobalWorkerOptions.workerSrc =
+    `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.mjs`
+
+  const pdf = await pdfjsLib.getDocument({ data: await file.arrayBuffer() }).promise
+  const images: string[] = []
+  const pages = Math.min(pdf.numPages, maxPages)
+
+  for (let i = 1; i <= pages; i++) {
+    const page = await pdf.getPage(i)
+    const viewport = page.getViewport({ scale: 2.0 }) // 2× for readable OCR
+    const canvas = document.createElement("canvas")
+    canvas.width = viewport.width
+    canvas.height = viewport.height
+    const ctx = canvas.getContext("2d")!
+    await page.render({ canvasContext: ctx, canvas, viewport }).promise
+    images.push(canvas.toDataURL("image/jpeg", 0.85))
+  }
+  return images
+}
+
 const SENIORITY_OPTIONS: { value: Seniority; label: string; years: string }[] = [
   { value: "fresher", label: "Fresher",     years: "0 years" },
   { value: "junior",  label: "Junior",      years: "1–2 years" },
@@ -97,20 +120,45 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
       formData.append("file", file)
       const extractRes = await fetch("/api/extract-text", { method: "POST", body: formData })
 
-      if (extractRes.status === 422) {
-        // Scanned / image-only PDF — quietly switch to paste mode
-        setPasteMode(true)
-        setParseError("Your PDF is scanned (image-only). Please paste your resume text in the box below.")
-        setStep("upload")
-        return
+      if (extractRes.status === 422 || (await (async () => {
+        if (!extractRes.ok) return false
+        const d = await extractRes.clone().json().catch(() => ({}))
+        return !d.text?.trim()
+      })())) {
+        // Scanned / image-only PDF — run OCR via Groq vision automatically
+        setParseStatus("Scanned PDF detected — running OCR with Groq vision…")
+        try {
+          const images = await renderPdfAsImages(file)
+          if (!images.length) throw new Error("No pages rendered")
+
+          const ocrRes = await fetch("/api/ocr-resume", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "x-groq-key": apiKeys.groq },
+            body: JSON.stringify({ images }),
+          })
+          if (!ocrRes.ok) {
+            const body = await ocrRes.text().catch(() => "")
+            throw new Error(`OCR API error ${ocrRes.status}: ${body.slice(0, 150)}`)
+          }
+          const parsed = await ocrRes.json()
+          if (parsed.error) throw new Error(parsed.error)
+          applyParsed(parsed)
+          setStep("review")
+          return
+        } catch (ocrErr) {
+          console.error("OCR failed:", ocrErr)
+          // Last resort: paste mode
+          setPasteMode(true)
+          setParseError("OCR failed — please paste your resume text below.")
+          setStep("upload")
+          return
+        }
       }
 
       if (!extractRes.ok) {
-        const body = await extractRes.text().catch(() => "")
         setPasteMode(true)
-        setParseError(`Could not read the file (${extractRes.status}). Please paste your resume text instead.`)
+        setParseError(`Could not read file (${extractRes.status}). Please paste your resume text instead.`)
         setStep("upload")
-        console.error("extract-text error:", body)
         return
       }
 
@@ -124,9 +172,9 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
         return
       }
     } catch (e) {
-      console.error("extraction fetch error:", e)
+      console.error("extraction error:", e)
       setPasteMode(true)
-      setParseError("Network error reading file. Please paste your resume text instead.")
+      setParseError("Could not read file. Please paste your resume text instead.")
       setStep("upload")
       return
     }
