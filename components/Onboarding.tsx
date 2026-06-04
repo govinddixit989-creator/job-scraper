@@ -89,33 +89,59 @@ export default function Onboarding({ onComplete, apiKeys }: Props) {
     setFileName(file.name)
     setStep("parsing")
 
+    // ── Step 1: extract text ────────────────────────────────────────────────
+    let text = ""
     try {
-      // Step 1: extract text
       setParseStatus("Extracting text from resume…")
       const formData = new FormData()
       formData.append("file", file)
       const extractRes = await fetch("/api/extract-text", { method: "POST", body: formData })
-      const extractData = await extractRes.json()
 
-      if (!extractRes.ok || extractData.error) {
-        // Scanned PDF or extraction failure — show paste fallback
-        setParseError(extractData.error ?? "Could not read PDF text.")
+      if (extractRes.status === 422) {
+        // Scanned / image-only PDF — quietly switch to paste mode
         setPasteMode(true)
+        setParseError("Your PDF is scanned (image-only). Please paste your resume text in the box below.")
         setStep("upload")
         return
       }
 
-      const text: string = extractData.text
-      setRawText(text)
+      if (!extractRes.ok) {
+        const body = await extractRes.text().catch(() => "")
+        setPasteMode(true)
+        setParseError(`Could not read the file (${extractRes.status}). Please paste your resume text instead.`)
+        setStep("upload")
+        console.error("extract-text error:", body)
+        return
+      }
 
-      // Step 2: Groq parse
+      const extractData = await extractRes.json()
+      text = extractData.text ?? ""
+
+      if (!text.trim()) {
+        setPasteMode(true)
+        setParseError("No text found in the PDF. Please paste your resume text instead.")
+        setStep("upload")
+        return
+      }
+    } catch (e) {
+      console.error("extraction fetch error:", e)
+      setPasteMode(true)
+      setParseError("Network error reading file. Please paste your resume text instead.")
+      setStep("upload")
+      return
+    }
+
+    setRawText(text)
+
+    // ── Step 2: Groq parse ──────────────────────────────────────────────────
+    try {
       const parsed = await parseWithGroq(text)
       applyParsed(parsed)
       setStep("review")
     } catch (e) {
-      console.error("processFile error:", e)
+      console.error("groq parse error:", e)
       const msg = e instanceof Error ? e.message : String(e)
-      setParseError(`Parse failed: ${msg.slice(0, 200)}`)
+      setParseError(`AI parsing failed: ${msg.slice(0, 200)}`)
       setStep("upload")
     }
   }
