@@ -1,4 +1,4 @@
-import { Job, JobStatus, UserPreferences } from "./types"
+import { Job, JobStatus, UserPreferences, ApiKeys } from "./types"
 
 const STATUS_KEY = "job_statuses"
 const CACHE_KEY = "jobs_cache"
@@ -64,4 +64,24 @@ export function savePreferences(prefs: UserPreferences) {
 
 export function clearPreferences() {
   localStorage.removeItem(PREFS_KEY)
+}
+
+const KEYS_KEY = "api_keys"
+
+export function getApiKeys(): ApiKeys | null {
+  if (typeof window === "undefined") return null
+  try {
+    const raw = localStorage.getItem(KEYS_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+export function saveApiKeys(keys: ApiKeys) {
+  localStorage.setItem(KEYS_KEY, JSON.stringify(keys))
+}
+
+export function clearApiKeys() {
+  localStorage.removeItem(KEYS_KEY)
 }

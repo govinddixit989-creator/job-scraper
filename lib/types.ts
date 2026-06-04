@@ -2,6 +2,11 @@ export type JobStatus = "new" | "saved" | "applied" | "skipped"
 
 export type WorkType = "remote" | "contract" | "fulltime" | "any"
 
+export interface ApiKeys {
+  groq: string
+  apify: string
+}
+
 export interface UserPreferences {
   roles: string[]          // e.g. ["React Developer", "Frontend Engineer"]
   skills: string[]         // e.g. ["React", "TypeScript", "Node.js"]
@@ -20,6 +25,6 @@ export interface Job {
   tags: string[]
   url: string
   postedAt: string
-  source: "remoteok" | "weworkremotely" | "remotive"
+  source: "remoteok" | "weworkremotely" | "remotive" | "linkedin"
   status: JobStatus
 }

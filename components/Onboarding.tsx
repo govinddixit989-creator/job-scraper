@@ -1,7 +1,7 @@
 "use client"
 
 import { useState, useRef } from "react"
-import { UserPreferences, WorkType } from "@/lib/types"
+import { UserPreferences, WorkType, ApiKeys } from "@/lib/types"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import {
@@ -18,6 +18,7 @@ import {
 
 interface Props {
   onComplete: (prefs: UserPreferences) => void
+  apiKeys: ApiKeys
 }
 
 const WORK_TYPE_OPTIONS: { value: WorkType; label: string; desc: string }[] = [
@@ -75,7 +76,7 @@ const ALL_KNOWN_SKILLS = [
   "React Native", "Flutter", "Android", "iOS",
 ]
 
-export default function Onboarding({ onComplete }: Props) {
+export default function Onboarding({ onComplete, apiKeys }: Props) {
   const [step, setStep] = useState(0)
   const [roles, setRoles] = useState<string[]>([])
   const [roleInput, setRoleInput] = useState("")
@@ -121,17 +122,39 @@ export default function Onboarding({ onComplete }: Props) {
     setParsing(true)
     setResumeFileName(file.name)
     try {
+      // Extract raw text client-side
       let text = ""
       if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
         text = await extractPdfText(file)
       } else {
-        // For DOCX / TXT — read as plain text (rough extraction)
         text = await file.text()
       }
       setResumeText(text)
-      // Auto-detect skills from resume and merge
-      const detected = extractSkillsFromText(text, ALL_KNOWN_SKILLS)
-      setSkills((prev) => [...new Set([...prev, ...detected])])
+
+      // Use Groq AI to parse resume properly
+      const res = await fetch("/api/parse-resume", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-groq-key": apiKeys.groq,
+        },
+        body: JSON.stringify({ text }),
+      })
+
+      if (res.ok) {
+        const parsed = await res.json()
+        // Merge AI-extracted skills + roles into user's profile
+        const aiSkills: string[] = [...(parsed.skills ?? []), ...(parsed.technologies ?? [])]
+        const aiRoles: string[] = parsed.roles ?? []
+        setSkills((prev) => [...new Set([...prev, ...aiSkills])])
+        if (aiRoles.length > 0 && roles.length === 0) {
+          setRoles(aiRoles.slice(0, 3))
+        }
+      } else {
+        // Fallback to heuristic extraction
+        const detected = extractSkillsFromText(text, ALL_KNOWN_SKILLS)
+        setSkills((prev) => [...new Set([...prev, ...detected])])
+      }
     } catch {
       setParseError("Could not read file. Try a plain PDF or paste your skills manually.")
     } finally {

@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState, useMemo, useCallback } from "react"
-import { Job, JobStatus, UserPreferences } from "@/lib/types"
+import { Job, JobStatus, UserPreferences, ApiKeys } from "@/lib/types"
 import { getStatuses, setStatus, getCachedJobs, setCachedJobs, clearCache } from "@/lib/storage"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
@@ -30,6 +30,7 @@ import {
   Sparkles,
   Search,
   SlidersHorizontal,
+  Loader2,
 } from "lucide-react"
 
 const STATUS_CONFIG: Record<
@@ -64,6 +65,7 @@ const SOURCE_LABELS: Record<string, string> = {
   remoteok: "RemoteOK",
   weworkremotely: "WWR",
   remotive: "Remotive",
+  linkedin: "LinkedIn",
 }
 
 function timeAgo(dateStr: string): string {
@@ -81,10 +83,11 @@ function timeAgo(dateStr: string): string {
 
 interface Props {
   preferences: UserPreferences
+  apiKeys: ApiKeys
   onEditPrefs: () => void
 }
 
-export default function JobTracker({ preferences, onEditPrefs }: Props) {
+export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props) {
   const [jobs, setJobs] = useState<Job[]>([])
   const [statuses, setStatuses] = useState<Record<string, JobStatus>>({})
   const [loading, setLoading] = useState(true)
@@ -94,6 +97,8 @@ export default function JobTracker({ preferences, onEditPrefs }: Props) {
   const [tab, setTab] = useState<JobStatus | "all">("all")
   const [sourceFilter, setSourceFilter] = useState("all")
   const [fetchedAt, setFetchedAt] = useState<string>("")
+  const [linkedinLoading, setLinkedinLoading] = useState(false)
+  const [linkedinStatus, setLinkedinStatus] = useState<string>("")
 
   const loadJobs = useCallback(async (force = false) => {
     if (!force) {
@@ -130,6 +135,40 @@ export default function JobTracker({ preferences, onEditPrefs }: Props) {
     setRefreshing(true)
     clearCache()
     loadJobs(true)
+  }
+
+  const scrapeLinkedIn = async () => {
+    setLinkedinLoading(true)
+    setLinkedinStatus("Scraping LinkedIn Jobs via Apify… (takes ~2 min)")
+    try {
+      const res = await fetch("/api/apify-jobs", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-apify-key": apiKeys.apify,
+        },
+        body: JSON.stringify({ roles: preferences.roles }),
+      })
+      if (!res.ok) throw new Error(await res.text())
+      const data = await res.json()
+      const newJobs: Job[] = data.jobs ?? []
+      if (newJobs.length > 0) {
+        setJobs((prev) => {
+          const ids = new Set(prev.map((j) => j.id))
+          const merged = [...prev, ...newJobs.filter((j) => !ids.has(j.id))]
+          setCachedJobs(merged)
+          return merged
+        })
+        setLinkedinStatus(`Added ${newJobs.length} LinkedIn jobs`)
+      } else {
+        setLinkedinStatus("No new jobs found")
+      }
+    } catch (e) {
+      setLinkedinStatus(`Error: ${String(e).slice(0, 80)}`)
+    } finally {
+      setLinkedinLoading(false)
+      setTimeout(() => setLinkedinStatus(""), 4000)
+    }
   }
 
   const cycleStatus = (jobId: string) => {
@@ -254,6 +293,7 @@ export default function JobTracker({ preferences, onEditPrefs }: Props) {
             <SelectItem value="remoteok">RemoteOK</SelectItem>
             <SelectItem value="weworkremotely">WeWorkRemotely</SelectItem>
             <SelectItem value="remotive">Remotive</SelectItem>
+            <SelectItem value="linkedin">LinkedIn</SelectItem>
           </SelectContent>
         </Select>
 
@@ -266,7 +306,21 @@ export default function JobTracker({ preferences, onEditPrefs }: Props) {
           Refresh
         </button>
 
-        {fetchedAt && (
+        <button
+          onClick={scrapeLinkedIn}
+          disabled={linkedinLoading}
+          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+          title="Scrape LinkedIn Jobs using Apify"
+        >
+          {linkedinLoading && <Loader2 size={14} className="animate-spin" />}
+          LinkedIn
+        </button>
+
+        {linkedinStatus && (
+          <span className="text-xs text-muted-foreground hidden sm:inline">{linkedinStatus}</span>
+        )}
+
+        {!linkedinStatus && fetchedAt && (
           <span className="text-xs text-muted-foreground hidden sm:inline">
             Updated {new Date(fetchedAt).toLocaleTimeString()}
           </span>
