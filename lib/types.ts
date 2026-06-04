@@ -2,29 +2,43 @@ export type JobStatus = "new" | "saved" | "applied" | "skipped"
 
 export type WorkType = "remote" | "contract" | "fulltime" | "any"
 
-export interface ApiKeys {
-  groq: string
-  apify: string
-}
-
-export interface UserPreferences {
-  roles: string[]          // e.g. ["React Developer", "Frontend Engineer"]
-  skills: string[]         // e.g. ["React", "TypeScript", "Node.js"]
-  workTypes: WorkType[]
-  resumeText?: string      // raw extracted text from PDF
-  resumeName?: string
-}
+export type JobSource =
+  | "remoteok"
+  | "weworkremotely"
+  | "remotive"
+  | "arbeitnow"
+  | "himalayas"
+  | "jobicy"
+  | "linkedin"
+  | "indeed"
+  | "naukri"
+  | "glassdoor"
 
 export interface Job {
   id: string
   title: string
   company: string
   location: string
-  type: string        // remote, hybrid, onsite
+  type: string
   salary?: string
   tags: string[]
   url: string
   postedAt: string
-  source: "remoteok" | "weworkremotely" | "remotive" | "linkedin"
+  source: JobSource
   status: JobStatus
+}
+
+export type WorkType2 = WorkType
+
+export interface UserPreferences {
+  roles: string[]
+  skills: string[]
+  workTypes: WorkType[]
+  resumeText?: string
+  resumeName?: string
+}
+
+export interface ApiKeys {
+  groq: string
+  apify: string
 }

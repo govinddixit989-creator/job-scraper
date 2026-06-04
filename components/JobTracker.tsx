@@ -1,85 +1,110 @@
 "use client"
 
 import { useEffect, useState, useMemo, useCallback } from "react"
-import { Job, JobStatus, UserPreferences, ApiKeys } from "@/lib/types"
+import { Job, JobStatus, JobSource, UserPreferences, ApiKeys } from "@/lib/types"
 import { getStatuses, setStatus, getCachedJobs, setCachedJobs, clearCache } from "@/lib/storage"
 import { Input } from "@/components/ui/input"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "@/components/ui/select"
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table"
 import {
-  ExternalLink,
-  RefreshCw,
-  Bookmark,
-  CheckCircle2,
-  XCircle,
-  Sparkles,
-  Search,
-  SlidersHorizontal,
-  Loader2,
+  ExternalLink, RefreshCw, Bookmark, CheckCircle2, XCircle,
+  Sparkles, Search, SlidersHorizontal, Loader2,
 } from "lucide-react"
 
-const STATUS_CONFIG: Record<
-  JobStatus,
-  { label: string; icon: React.ReactNode; className: string }
-> = {
-  new: {
-    label: "New",
-    icon: <Sparkles size={13} />,
-    className: "bg-blue-500/10 text-blue-600 border-blue-500/20 hover:bg-blue-500/20",
-  },
-  saved: {
-    label: "Saved",
-    icon: <Bookmark size={13} />,
-    className: "bg-yellow-500/10 text-yellow-600 border-yellow-500/20 hover:bg-yellow-500/20",
-  },
-  applied: {
-    label: "Applied",
-    icon: <CheckCircle2 size={13} />,
-    className: "bg-green-500/10 text-green-600 border-green-500/20 hover:bg-green-500/20",
-  },
-  skipped: {
-    label: "Skip",
-    icon: <XCircle size={13} />,
-    className: "bg-zinc-500/10 text-zinc-500 border-zinc-500/20 hover:bg-zinc-500/20",
-  },
-}
+// ─── Config ───────────────────────────────────────────────────────────────────
 
+const STATUS_CONFIG: Record<JobStatus, { label: string; icon: React.ReactNode; className: string }> = {
+  new:     { label: "New",     icon: <Sparkles size={13} />,    className: "bg-blue-500/10 text-blue-600 border-blue-500/20 hover:bg-blue-500/20" },
+  saved:   { label: "Saved",   icon: <Bookmark size={13} />,    className: "bg-yellow-500/10 text-yellow-600 border-yellow-500/20 hover:bg-yellow-500/20" },
+  applied: { label: "Applied", icon: <CheckCircle2 size={13} />, className: "bg-green-500/10 text-green-600 border-green-500/20 hover:bg-green-500/20" },
+  skipped: { label: "Skip",    icon: <XCircle size={13} />,     className: "bg-zinc-500/10 text-zinc-500 border-zinc-500/20 hover:bg-zinc-500/20" },
+}
 const STATUS_CYCLE: JobStatus[] = ["new", "saved", "applied", "skipped"]
 
-const SOURCE_LABELS: Record<string, string> = {
-  remoteok: "RemoteOK",
+const SOURCE_LABELS: Record<JobSource, string> = {
+  remoteok:     "RemoteOK",
   weworkremotely: "WWR",
-  remotive: "Remotive",
-  linkedin: "LinkedIn",
+  remotive:     "Remotive",
+  arbeitnow:    "Arbeitnow",
+  himalayas:    "Himalayas",
+  jobicy:       "Jobicy",
+  linkedin:     "LinkedIn",
+  indeed:       "Indeed",
+  naukri:       "Naukri",
+  glassdoor:    "Glassdoor",
+}
+
+// Platforms scraped via Apify, shown as buttons
+const APIFY_PLATFORMS: { id: string; label: string; flag: string }[] = [
+  { id: "linkedin",  label: "LinkedIn",  flag: "🌐" },
+  { id: "indeed",    label: "Indeed",    flag: "🔍" },
+  { id: "naukri",    label: "Naukri",    flag: "🇮🇳" },
+  { id: "glassdoor", label: "Glassdoor", flag: "🏢" },
+]
+
+// ─── Match scoring (0-100) ────────────────────────────────────────────────────
+function computeMatch(job: Job, prefs: UserPreferences): number {
+  const text = `${job.title} ${job.tags.join(" ")} ${job.company}`.toLowerCase()
+  const userSkills = prefs.skills.map((s) => s.toLowerCase())
+  const userRoles  = prefs.roles.map((r) => r.toLowerCase())
+
+  // Role match — 0-40 pts
+  const roleHits = userRoles.filter((r) => text.includes(r)).length
+  const roleScore = Math.min(40, roleHits * (40 / Math.max(userRoles.length, 1)))
+
+  // Skill match — 0-40 pts
+  const skillHits = userSkills.filter((s) => text.includes(s)).length
+  const skillScore = userSkills.length
+    ? Math.min(40, (skillHits / userSkills.length) * 40)
+    : 20 // neutral if no skills set
+
+  // Work type match — 0-20 pts
+  const wantAny = prefs.workTypes.includes("any")
+  const jt = job.type.toLowerCase()
+  let workScore = 0
+  if (wantAny) {
+    workScore = 20
+  } else {
+    if (prefs.workTypes.includes("remote")   && jt.includes("remote"))   workScore = 20
+    if (prefs.workTypes.includes("contract") && (jt.includes("contract") || jt.includes("freelance"))) workScore = 20
+    if (prefs.workTypes.includes("fulltime") && (jt.includes("full") || jt.includes("permanent")))     workScore = 20
+  }
+
+  return Math.round(roleScore + skillScore + workScore)
+}
+
+function MatchBadge({ score }: { score: number }) {
+  if (score === 0) return <span className="text-xs text-muted-foreground">—</span>
+  const cls =
+    score >= 70 ? "bg-green-500/10 text-green-600 border-green-500/20" :
+    score >= 40 ? "bg-yellow-500/10 text-yellow-600 border-yellow-500/20" :
+                  "bg-zinc-100 text-zinc-400 border-zinc-200"
+  return (
+    <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[11px] font-medium border tabular-nums ${cls}`}>
+      {score}%
+    </span>
+  )
 }
 
 function timeAgo(dateStr: string): string {
   if (!dateStr) return "—"
   const d = new Date(dateStr)
   if (isNaN(d.getTime())) return "—"
-  const diff = Date.now() - d.getTime()
-  const days = Math.floor(diff / 86400000)
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000)
   if (days === 0) return "Today"
   if (days === 1) return "Yesterday"
   if (days < 7) return `${days}d ago`
   if (days < 30) return `${Math.floor(days / 7)}w ago`
   return `${Math.floor(days / 30)}mo ago`
 }
+
+// ─── Component ────────────────────────────────────────────────────────────────
 
 interface Props {
   preferences: UserPreferences
@@ -96,19 +121,15 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
   const [search, setSearch] = useState("")
   const [tab, setTab] = useState<JobStatus | "all">("all")
   const [sourceFilter, setSourceFilter] = useState("all")
-  const [fetchedAt, setFetchedAt] = useState<string>("")
-  const [linkedinLoading, setLinkedinLoading] = useState(false)
-  const [linkedinStatus, setLinkedinStatus] = useState<string>("")
+  const [fetchedAt, setFetchedAt] = useState("")
+  const [scrapingPlatform, setScrapingPlatform] = useState<string | null>(null)
+  const [scrapeMsg, setScrapeMsg] = useState("")
+  const [onlyMatching, setOnlyMatching] = useState(false)
 
   const loadJobs = useCallback(async (force = false) => {
     if (!force) {
       const cached = getCachedJobs()
-      if (cached) {
-        setJobs(cached)
-        setStatuses(getStatuses())
-        setLoading(false)
-        return
-      }
+      if (cached) { setJobs(cached); setStatuses(getStatuses()); setLoading(false); return }
     }
     try {
       const res = await fetch("/api/jobs")
@@ -118,7 +139,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
       setFetchedAt(data.fetchedAt)
       setJobs(data.jobs)
       setStatuses(getStatuses())
-    } catch (e) {
+    } catch {
       setError("Could not load jobs. Check your connection.")
     } finally {
       setLoading(false)
@@ -126,31 +147,21 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
     }
   }, [])
 
-  useEffect(() => {
-    loadJobs()
-    setStatuses(getStatuses())
-  }, [loadJobs])
+  useEffect(() => { loadJobs(); setStatuses(getStatuses()) }, [loadJobs])
 
-  const handleRefresh = () => {
-    setRefreshing(true)
-    clearCache()
-    loadJobs(true)
-  }
+  const handleRefresh = () => { setRefreshing(true); clearCache(); loadJobs(true) }
 
-  const scrapeLinkedIn = async () => {
-    setLinkedinLoading(true)
-    setLinkedinStatus("Scraping LinkedIn Jobs via Apify… (takes ~2 min)")
+  const scrapeApify = async (platform: string) => {
+    setScrapingPlatform(platform)
+    setScrapeMsg(`Scraping ${SOURCE_LABELS[platform as JobSource] ?? platform}… (~2 min)`)
     try {
       const res = await fetch("/api/apify-jobs", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-apify-key": apiKeys.apify,
-        },
-        body: JSON.stringify({ roles: preferences.roles }),
+        headers: { "Content-Type": "application/json", "x-apify-key": apiKeys.apify },
+        body: JSON.stringify({ platform, roles: preferences.roles, skills: preferences.skills }),
       })
-      if (!res.ok) throw new Error(await res.text())
       const data = await res.json()
+      if (!res.ok) { setScrapeMsg(`Error: ${data.error?.slice(0, 80)}`); return }
       const newJobs: Job[] = data.jobs ?? []
       if (newJobs.length > 0) {
         setJobs((prev) => {
@@ -159,15 +170,15 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
           setCachedJobs(merged)
           return merged
         })
-        setLinkedinStatus(`Added ${newJobs.length} LinkedIn jobs`)
+        setScrapeMsg(`✓ Added ${newJobs.length} jobs from ${SOURCE_LABELS[platform as JobSource]}`)
       } else {
-        setLinkedinStatus("No new jobs found")
+        setScrapeMsg("No new jobs found")
       }
     } catch (e) {
-      setLinkedinStatus(`Error: ${String(e).slice(0, 80)}`)
+      setScrapeMsg(`Error: ${String(e).slice(0, 80)}`)
     } finally {
-      setLinkedinLoading(false)
-      setTimeout(() => setLinkedinStatus(""), 4000)
+      setScrapingPlatform(null)
+      setTimeout(() => setScrapeMsg(""), 5000)
     }
   }
 
@@ -178,31 +189,31 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
     setStatuses((prev) => ({ ...prev, [jobId]: next }))
   }
 
+  // ── Filter + Score + Sort ──────────────────────────────────────────────────
+  const scoredJobs = useMemo(
+    () => jobs.map((job) => ({ job, score: computeMatch(job, preferences) })),
+    [jobs, preferences]
+  )
+
   const filtered = useMemo(() => {
-    const userSkills = preferences.skills.map((s) => s.toLowerCase())
-    const userRoles = preferences.roles.map((r) => r.toLowerCase())
     const wantAny = preferences.workTypes.includes("any")
 
-    return jobs
-      .filter((job) => {
+    return scoredJobs
+      .filter(({ job, score }) => {
         const jobStatus = statuses[job.id] ?? "new"
         if (tab !== "all" && jobStatus !== tab) return false
         if (sourceFilter !== "all" && job.source !== sourceFilter) return false
+        if (onlyMatching && score < 40) return false
 
-        // Work type filter
         if (!wantAny) {
-          const wantsRemote = preferences.workTypes.includes("remote")
-          const wantsContract = preferences.workTypes.includes("contract")
-          const wantsFulltime = preferences.workTypes.includes("fulltime")
           const jt = job.type.toLowerCase()
-          const matches =
-            (wantsRemote && jt.includes("remote")) ||
-            (wantsContract && (jt.includes("contract") || jt.includes("freelance"))) ||
-            (wantsFulltime && (jt.includes("full") || jt.includes("permanent")))
-          if (!matches) return false
+          const ok =
+            (preferences.workTypes.includes("remote")   && jt.includes("remote")) ||
+            (preferences.workTypes.includes("contract") && (jt.includes("contract") || jt.includes("freelance"))) ||
+            (preferences.workTypes.includes("fulltime") && (jt.includes("full") || jt.includes("permanent")))
+          if (!ok) return false
         }
 
-        // Search bar
         if (search) {
           const q = search.toLowerCase()
           return (
@@ -213,33 +224,25 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
         }
         return true
       })
-      .sort((a, b) => {
-        // Rank by skill/role relevance
-        const score = (job: Job) => {
-          let s = 0
-          const text = `${job.title} ${job.tags.join(" ")}`.toLowerCase()
-          userSkills.forEach((sk) => { if (text.includes(sk)) s += 2 })
-          userRoles.forEach((r) => { if (text.includes(r)) s += 3 })
-          return s
-        }
-        return score(b) - score(a)
-      })
-  }, [jobs, statuses, tab, sourceFilter, search, preferences])
+      .sort((a, b) => b.score - a.score)
+  }, [scoredJobs, statuses, tab, sourceFilter, search, onlyMatching, preferences])
 
   const counts = useMemo(() => {
     const c: Record<string, number> = { all: jobs.length, new: 0, saved: 0, applied: 0, skipped: 0 }
-    jobs.forEach((job) => {
-      const s = statuses[job.id] ?? "new"
-      c[s] = (c[s] ?? 0) + 1
-    })
+    jobs.forEach((job) => { const s = statuses[job.id] ?? "new"; c[s] = (c[s] ?? 0) + 1 })
     return c
   }, [jobs, statuses])
+
+  const highMatchCount = useMemo(
+    () => scoredJobs.filter(({ score }) => score >= 70).length,
+    [scoredJobs]
+  )
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64 text-muted-foreground gap-3">
         <RefreshCw size={18} className="animate-spin" />
-        <span>Fetching jobs from 3 sources…</span>
+        <span>Fetching jobs from 6 sources…</span>
       </div>
     )
   }
@@ -255,21 +258,52 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
 
   return (
     <div className="space-y-4">
-      {/* Preferences summary bar */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className="text-xs text-muted-foreground">Showing jobs for:</span>
+
+      {/* Preferences bar */}
+      <div className="flex items-center gap-2 flex-wrap text-sm">
+        <span className="text-muted-foreground text-xs">Filtering for:</span>
         {preferences.roles.map((r) => (
           <Badge key={r} variant="secondary" className="text-xs">{r}</Badge>
         ))}
         {preferences.workTypes.map((wt) => (
           <Badge key={wt} variant="outline" className="text-xs capitalize">{wt}</Badge>
         ))}
-        <button
-          onClick={onEditPrefs}
-          className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors ml-auto"
-        >
-          <SlidersHorizontal size={12} /> Edit preferences
+        {preferences.skills.slice(0, 5).map((s) => (
+          <span key={s} className="text-xs text-muted-foreground font-mono">{s}</span>
+        ))}
+        {preferences.skills.length > 5 && (
+          <span className="text-xs text-muted-foreground">+{preferences.skills.length - 5} skills</span>
+        )}
+        <button onClick={onEditPrefs} className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors ml-auto">
+          <SlidersHorizontal size={12} /> Edit
         </button>
+      </div>
+
+      {/* Stats row */}
+      <div className="flex items-center gap-4 text-sm text-muted-foreground">
+        <span><span className="font-semibold text-foreground">{jobs.length}</span> total jobs</span>
+        <span><span className="font-semibold text-green-600">{highMatchCount}</span> high match (≥70%)</span>
+        <span><span className="font-semibold text-foreground">{filtered.length}</span> shown</span>
+      </div>
+
+      {/* Apify scrape buttons */}
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs text-muted-foreground">Scrape more:</span>
+        {APIFY_PLATFORMS.map(({ id, label, flag }) => (
+          <button
+            key={id}
+            onClick={() => scrapeApify(id)}
+            disabled={scrapingPlatform !== null}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded-full hover:bg-muted transition-colors disabled:opacity-50"
+          >
+            {scrapingPlatform === id
+              ? <Loader2 size={11} className="animate-spin" />
+              : <span>{flag}</span>
+            }
+            {label}
+          </button>
+        ))}
+        {scrapeMsg && <span className="text-xs text-muted-foreground">{scrapeMsg}</span>}
       </div>
 
       {/* Toolbar */}
@@ -277,7 +311,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
         <div className="relative flex-1 max-w-sm">
           <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
           <Input
-            placeholder="Search title, company, tech…"
+            placeholder="Search title, company, skill…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="pl-9 h-9"
@@ -290,12 +324,21 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
           </SelectTrigger>
           <SelectContent>
             <SelectItem value="all">All sources</SelectItem>
-            <SelectItem value="remoteok">RemoteOK</SelectItem>
-            <SelectItem value="weworkremotely">WeWorkRemotely</SelectItem>
-            <SelectItem value="remotive">Remotive</SelectItem>
-            <SelectItem value="linkedin">LinkedIn</SelectItem>
+            {Object.entries(SOURCE_LABELS).map(([key, label]) => (
+              <SelectItem key={key} value={key}>{label}</SelectItem>
+            ))}
           </SelectContent>
         </Select>
+
+        <label className="flex items-center gap-2 text-sm cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={onlyMatching}
+            onChange={(e) => setOnlyMatching(e.target.checked)}
+            className="rounded"
+          />
+          <span className="text-muted-foreground">Only matching (≥40%)</span>
+        </label>
 
         <button
           onClick={handleRefresh}
@@ -306,23 +349,9 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
           Refresh
         </button>
 
-        <button
-          onClick={scrapeLinkedIn}
-          disabled={linkedinLoading}
-          className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-          title="Scrape LinkedIn Jobs using Apify"
-        >
-          {linkedinLoading && <Loader2 size={14} className="animate-spin" />}
-          LinkedIn
-        </button>
-
-        {linkedinStatus && (
-          <span className="text-xs text-muted-foreground hidden sm:inline">{linkedinStatus}</span>
-        )}
-
-        {!linkedinStatus && fetchedAt && (
+        {fetchedAt && (
           <span className="text-xs text-muted-foreground hidden sm:inline">
-            Updated {new Date(fetchedAt).toLocaleTimeString()}
+            {new Date(fetchedAt).toLocaleTimeString()}
           </span>
         )}
       </div>
@@ -344,55 +373,65 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
         <Table>
           <TableHeader>
             <TableRow className="bg-muted/40 hover:bg-muted/40">
-              <TableHead className="w-[260px]">Role</TableHead>
-              <TableHead className="w-[160px]">Company</TableHead>
-              <TableHead className="hidden md:table-cell">Tags</TableHead>
-              <TableHead className="hidden sm:table-cell w-[90px]">Location</TableHead>
-              <TableHead className="hidden lg:table-cell w-[80px]">Salary</TableHead>
+              <TableHead className="w-8 text-center">#</TableHead>
+              <TableHead className="w-14 text-center">Match</TableHead>
+              <TableHead className="w-[240px]">Role</TableHead>
+              <TableHead className="w-[140px]">Company</TableHead>
+              <TableHead className="hidden md:table-cell">Skills</TableHead>
+              <TableHead className="hidden sm:table-cell w-[80px]">Location</TableHead>
+              <TableHead className="hidden lg:table-cell w-[90px]">Salary</TableHead>
               <TableHead className="hidden sm:table-cell w-[70px]">Source</TableHead>
-              <TableHead className="w-[80px]">Posted</TableHead>
+              <TableHead className="w-[72px]">Posted</TableHead>
               <TableHead className="w-[100px]">Status</TableHead>
-              <TableHead className="w-[44px]"></TableHead>
+              <TableHead className="w-[40px]"></TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
             {filtered.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={9} className="h-32 text-center text-muted-foreground">
-                  No jobs found
+                <TableCell colSpan={11} className="h-32 text-center text-muted-foreground">
+                  No jobs match your filters
                 </TableCell>
               </TableRow>
             ) : (
-              filtered.map((job) => {
+              filtered.map(({ job, score }, rowIdx) => {
                 const jobStatus = statuses[job.id] ?? "new"
                 const cfg = STATUS_CONFIG[jobStatus]
-                const isSkipped = jobStatus === "skipped"
 
                 return (
-                  <TableRow
-                    key={job.id}
-                    className={isSkipped ? "opacity-40" : undefined}
-                  >
-                    <TableCell className="font-medium max-w-[260px]">
-                      <span className="line-clamp-2 leading-snug">{job.title}</span>
+                  <TableRow key={job.id} className={jobStatus === "skipped" ? "opacity-40" : undefined}>
+                    <TableCell className="text-center text-xs text-muted-foreground tabular-nums">{rowIdx + 1}</TableCell>
+                    <TableCell className="text-center"><MatchBadge score={score} /></TableCell>
+
+                    <TableCell className="font-medium max-w-[240px]">
+                      <span className="line-clamp-2 leading-snug text-sm">{job.title}</span>
                     </TableCell>
 
-                    <TableCell className="text-muted-foreground max-w-[160px]">
+                    <TableCell className="text-muted-foreground text-sm max-w-[140px]">
                       <span className="truncate block">{job.company}</span>
                     </TableCell>
 
                     <TableCell className="hidden md:table-cell">
                       <div className="flex flex-wrap gap-1">
-                        {job.tags.slice(0, 4).map((tag) => (
-                          <Badge key={tag} variant="secondary" className="text-[11px] py-0 px-1.5 font-normal">
-                            {tag}
-                          </Badge>
-                        ))}
+                        {job.tags.slice(0, 4).map((tag) => {
+                          const isUserSkill = preferences.skills.some(
+                            (s) => s.toLowerCase() === tag.toLowerCase()
+                          )
+                          return (
+                            <Badge
+                              key={tag}
+                              variant={isUserSkill ? "default" : "secondary"}
+                              className={`text-[11px] py-0 px-1.5 font-normal ${isUserSkill ? "opacity-90" : ""}`}
+                            >
+                              {tag}
+                            </Badge>
+                          )
+                        })}
                       </div>
                     </TableCell>
 
                     <TableCell className="hidden sm:table-cell text-xs text-muted-foreground">
-                      <span className="truncate block max-w-[90px]">{job.location}</span>
+                      <span className="truncate block max-w-[80px]">{job.location}</span>
                     </TableCell>
 
                     <TableCell className="hidden lg:table-cell text-xs text-muted-foreground">
@@ -400,7 +439,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
                     </TableCell>
 
                     <TableCell className="hidden sm:table-cell">
-                      <Badge variant="outline" className="text-[11px] py-0 px-1.5 font-normal">
+                      <Badge variant="outline" className="text-[11px] py-0 px-1.5 font-normal whitespace-nowrap">
                         {SOURCE_LABELS[job.source] ?? job.source}
                       </Badge>
                     </TableCell>
@@ -414,8 +453,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
                         onClick={() => cycleStatus(job.id)}
                         className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium border transition-colors ${cfg.className}`}
                       >
-                        {cfg.icon}
-                        {cfg.label}
+                        {cfg.icon}{cfg.label}
                       </button>
                     </TableCell>
 
@@ -425,7 +463,6 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
                         target="_blank"
                         rel="noopener noreferrer"
                         className="flex items-center justify-center w-8 h-8 rounded-md hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-                        title="Open job listing"
                       >
                         <ExternalLink size={14} />
                       </a>
@@ -439,7 +476,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
       </div>
 
       <p className="text-xs text-muted-foreground text-right">
-        {filtered.length} of {jobs.length} jobs · Click status badge to cycle New → Saved → Applied → Skip
+        {filtered.length} shown · sorted by match score · click status badge to cycle
       </p>
     </div>
   )
