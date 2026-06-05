@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useMemo, useCallback } from "react"
+import { useEffect, useState, useMemo, useCallback, useRef } from "react"
 import { Job, JobStatus, JobSource, UserPreferences, ApiKeys } from "@/lib/types"
 import { getStatuses, setStatus, getCachedJobs, setCachedJobs, clearCache } from "@/lib/storage"
 import { Input } from "@/components/ui/input"
@@ -40,8 +40,7 @@ const SOURCE_LABELS: Record<JobSource, string> = {
   glassdoor:    "Glassdoor",
 }
 
-// Platforms scraped via Apify, shown as buttons
-const APIFY_PLATFORMS: { id: string; label: string; flag: string }[] = [
+const SCRAPE_PLATFORMS: { id: string; label: string; flag: string }[] = [
   { id: "linkedin",  label: "LinkedIn",  flag: "🌐" },
   { id: "indeed",    label: "Indeed",    flag: "🔍" },
   { id: "naukri",    label: "Naukri",    flag: "🇮🇳" },
@@ -166,9 +165,11 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
   const [tab, setTab] = useState<JobStatus | "all">("all")
   const [sourceFilter, setSourceFilter] = useState("all")
   const [fetchedAt, setFetchedAt] = useState("")
-  const [scrapingPlatform, setScrapingPlatform] = useState<string | null>(null)
-  const [scrapeMsg, setScrapeMsg] = useState("")
   const [onlyMatching, setOnlyMatching] = useState(true)
+  // Per-platform scrape state: null = idle, "loading" = in progress, "done"/"error" = finished
+  const [scrapeState, setScrapeState] = useState<Record<string, "loading" | "done" | "error">>({})
+  const [scrapeMsg,   setScrapeMsg]   = useState<Record<string, string>>({})
+  const autoScrapedRef = useRef(false)
 
   const loadJobs = useCallback(async (force = false) => {
     if (!force) {
@@ -191,38 +192,61 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
     }
   }, [])
 
-  useEffect(() => { loadJobs(); setStatuses(getStatuses()) }, [loadJobs])
+  // Auto-scrape all platforms once on first load (if not already cached)
+  useEffect(() => {
+    loadJobs().then(() => {
+      setStatuses(getStatuses())
+    })
+  }, [loadJobs])
 
-  const handleRefresh = () => { setRefreshing(true); clearCache(); loadJobs(true) }
+  useEffect(() => {
+    if (loading || autoScrapedRef.current) return
+    const hasApifyJobs = jobs.some(j =>
+      (["linkedin", "indeed", "naukri", "glassdoor"] as JobSource[]).includes(j.source)
+    )
+    if (!hasApifyJobs) {
+      autoScrapedRef.current = true
+      // Scrape all 4 platforms in parallel automatically
+      SCRAPE_PLATFORMS.forEach(({ id }) => scrapePlatform(id))
+    }
+  }, [loading, jobs.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  const scrapeApify = async (platform: string) => {
-    setScrapingPlatform(platform)
-    setScrapeMsg(`Scraping ${SOURCE_LABELS[platform as JobSource] ?? platform}… (~2 min)`)
+  const handleRefresh = () => {
+    setRefreshing(true)
+    autoScrapedRef.current = false
+    clearCache()
+    loadJobs(true)
+  }
+
+  const scrapePlatform = async (platform: string) => {
+    setScrapeState(s => ({ ...s, [platform]: "loading" }))
+    setScrapeMsg(m => ({ ...m, [platform]: "" }))
     try {
-      const res = await fetch("/api/apify-jobs", {
+      const res = await fetch("/api/scrape", {
         method: "POST",
         headers: { "Content-Type": "application/json", "x-apify-key": apiKeys.apify },
         body: JSON.stringify({ platform, roles: preferences.roles, skills: preferences.skills }),
       })
       const data = await res.json()
-      if (!res.ok) { setScrapeMsg(`Error: ${data.error?.slice(0, 80)}`); return }
       const newJobs: Job[] = data.jobs ?? []
+      const method: string = data.method ?? ""
       if (newJobs.length > 0) {
-        setJobs((prev) => {
-          const ids = new Set(prev.map((j) => j.id))
-          const merged = [...prev, ...newJobs.filter((j) => !ids.has(j.id))]
+        setJobs(prev => {
+          const ids = new Set(prev.map(j => j.id))
+          const merged = [...prev, ...newJobs.filter(j => !ids.has(j.id))]
           setCachedJobs(merged)
           return merged
         })
-        setScrapeMsg(`✓ Added ${newJobs.length} jobs from ${SOURCE_LABELS[platform as JobSource]}`)
+        setScrapeMsg(m => ({ ...m, [platform]: `+${newJobs.length} via ${method}` }))
+        setScrapeState(s => ({ ...s, [platform]: "done" }))
       } else {
-        setScrapeMsg("No new jobs found")
+        setScrapeMsg(m => ({ ...m, [platform]: data.error ? "failed" : "0 found" }))
+        setScrapeState(s => ({ ...s, [platform]: data.error ? "error" : "done" }))
       }
     } catch (e) {
-      setScrapeMsg(`Error: ${String(e).slice(0, 80)}`)
-    } finally {
-      setScrapingPlatform(null)
-      setTimeout(() => setScrapeMsg(""), 5000)
+      setScrapeMsg(m => ({ ...m, [platform]: "error" }))
+      setScrapeState(s => ({ ...s, [platform]: "error" }))
+      console.error(`[scrape] ${platform}:`, e)
     }
   }
 
@@ -343,24 +367,34 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
         )}
       </div>
 
-      {/* Apify scrape buttons */}
+      {/* Platform scrape status — auto-triggered, also manually re-triggerable */}
       <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-muted-foreground">Scrape more:</span>
-        {APIFY_PLATFORMS.map(({ id, label, flag }) => (
-          <button
-            key={id}
-            onClick={() => scrapeApify(id)}
-            disabled={scrapingPlatform !== null}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded-full hover:bg-muted transition-colors disabled:opacity-50"
-          >
-            {scrapingPlatform === id
-              ? <Loader2 size={11} className="animate-spin" />
-              : <span>{flag}</span>
-            }
-            {label}
-          </button>
-        ))}
-        {scrapeMsg && <span className="text-xs text-muted-foreground">{scrapeMsg}</span>}
+        <span className="text-xs text-muted-foreground">Sources:</span>
+        {SCRAPE_PLATFORMS.map(({ id, label, flag }) => {
+          const state = scrapeState[id]
+          const msg   = scrapeMsg[id]
+          return (
+            <button
+              key={id}
+              onClick={() => scrapePlatform(id)}
+              disabled={state === "loading"}
+              title={msg || `Rescrape ${label}`}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs border rounded-full transition-colors disabled:opacity-60 ${
+                state === "done"    ? "border-green-500/40 text-green-600 bg-green-500/5" :
+                state === "error"   ? "border-red-400/40 text-red-500 bg-red-500/5" :
+                state === "loading" ? "border-primary/40 text-primary bg-primary/5" :
+                "hover:bg-muted"
+              }`}
+            >
+              {state === "loading"
+                ? <Loader2 size={11} className="animate-spin" />
+                : <span>{flag}</span>
+              }
+              {label}
+              {msg && <span className="opacity-60">{msg}</span>}
+            </button>
+          )
+        })}
       </div>
 
       {/* Toolbar */}

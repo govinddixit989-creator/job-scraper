@@ -1,0 +1,12 @@
+{
+  "functions": {
+    "app/api/scrape/route.ts": {
+      "memory": 1024,
+      "maxDuration": 60
+    },
+    "app/api/extract-text/route.ts": {
+      "memory": 512,
+      "maxDuration": 30
+    }
+  }
+}
