@@ -1,66 +1,28 @@
 import { NextRequest, NextResponse } from "next/server"
-import { inflateSync } from "zlib"
+import { resolve } from "path"
+import { pathToFileURL } from "url"
 
-function decodePdfStr(s: string): string {
-  return s
-    .replace(/\\(\d{3})/g, (_, oct) => String.fromCharCode(parseInt(oct, 8)))
-    .replace(/\\n/g, " ").replace(/\\r/g, " ").replace(/\\t/g, " ")
-    .replace(/\\\\/g, "\\").replace(/\\([()\s])/g, "$1")
+// ─── pdfjs text extraction (handles ALL standard PDF fonts/encodings) ─────────
+async function extractWithPdfjs(buffer: Buffer): Promise<string> {
+  const { getDocument, GlobalWorkerOptions } = await import("pdfjs-dist/legacy/build/pdf.mjs")
+
+  // Build the worker path from process.cwd() to bypass Turbopack module resolution
+  const workerPath = resolve(process.cwd(), "node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs")
+  GlobalWorkerOptions.workerSrc = pathToFileURL(workerPath).toString()
+
+  const pdf = await getDocument({ data: new Uint8Array(buffer), verbosity: 0 }).promise
+  let text = ""
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page = await pdf.getPage(i)
+    const content = await page.getTextContent()
+    text += content.items
+      .map((item) => ("str" in item ? item.str : ""))
+      .join(" ") + "\n"
+  }
+  return text.replace(/\s+/g, " ").trim()
 }
 
-function extractFromStreams(streams: string[]): string {
-  const lines: string[] = []
-  for (const stream of streams) {
-    const btRe = /BT([\s\S]*?)ET/g
-    let block: RegExpExecArray | null
-    while ((block = btRe.exec(stream)) !== null) {
-      const body = block[1]
-      // TJ arrays: [(text)kern(text)...]TJ
-      const tjArrRe = /\[([^\]]*)\]\s*TJ/g
-      let m: RegExpExecArray | null
-      while ((m = tjArrRe.exec(body)) !== null) {
-        const parts: string[] = []
-        const partRe = /\(([^)]*)\)/g
-        let p: RegExpExecArray | null
-        while ((p = partRe.exec(m[1])) !== null) parts.push(decodePdfStr(p[1]))
-        const t = parts.join("").trim()
-        if (t) lines.push(t)
-      }
-      // Simple Tj: (text)Tj
-      const tjRe = /\(([^)]*)\)\s*Tj/g
-      while ((m = tjRe.exec(body)) !== null) {
-        const t = decodePdfStr(m[1]).trim()
-        if (t) lines.push(t)
-      }
-    }
-  }
-  return lines.join(" ").replace(/\s+/g, " ").trim()
-}
-
-function extractPdfText(buffer: Buffer): string {
-  const raw = buffer.toString("binary")
-
-  // Pass 1: try raw (uncompressed) streams
-  const rawText = extractFromStreams([raw])
-  if (rawText.length >= 100) return rawText
-
-  // Pass 2: decompress FlateDecode streams
-  const streamRe = /stream\r?\n([\s\S]*?)\r?\nendstream/g
-  const decompressed: string[] = []
-  let m: RegExpExecArray | null
-  while ((m = streamRe.exec(raw)) !== null) {
-    try {
-      decompressed.push(inflateSync(Buffer.from(m[1], "binary")).toString("binary"))
-    } catch { /* not a deflate stream, skip */ }
-  }
-  if (decompressed.length > 0) {
-    const text = extractFromStreams(decompressed)
-    if (text.length >= 50) return text
-  }
-
-  return ""
-}
-
+// ─── JPEG extractor for scanned PDFs ─────────────────────────────────────────
 function extractJpegsFromPdf(buffer: Buffer): string[] {
   const images: string[] = []
   let i = 0
@@ -86,6 +48,7 @@ function extractJpegsFromPdf(buffer: Buffer): string[] {
   return images
 }
 
+// ─── Route ────────────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
     const formData = await req.formData()
@@ -96,18 +59,30 @@ export async function POST(req: NextRequest) {
     const name = file.name.toLowerCase()
 
     if (name.endsWith(".pdf") || file.type === "application/pdf") {
-      const text = extractPdfText(buffer)
-      if (text.length >= 50) return NextResponse.json({ type: "text", text })
+      // 1. Try pdfjs — handles all standard encodings (Word, Google Docs, LaTeX, etc.)
+      try {
+        const text = await extractWithPdfjs(buffer)
+        if (text.length >= 80) {
+          return NextResponse.json({ type: "text", text })
+        }
+      } catch (e) {
+        console.error("[extract-text] pdfjs failed:", e)
+      }
 
+      // 2. Scanned PDF — try embedded JPEG images for OCR
       const images = extractJpegsFromPdf(buffer)
-      if (images.length > 0) return NextResponse.json({ type: "images", images: images.slice(0, 4) })
+      if (images.length > 0) {
+        return NextResponse.json({ type: "images", images: images.slice(0, 4) })
+      }
 
+      // 3. Give up — ask user to paste
       return NextResponse.json(
-        { error: "Could not extract content from this PDF. Try the Paste text option." },
+        { error: "Could not extract text from this PDF. Please use the Paste option." },
         { status: 422 }
       )
     }
 
+    // DOCX / TXT
     return NextResponse.json({ type: "text", text: buffer.toString("utf-8") })
   } catch (e) {
     console.error("[extract-text]", e)

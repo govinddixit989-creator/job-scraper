@@ -241,6 +241,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
 
   const filtered = useMemo(() => {
     const wantAny = preferences.workTypes.includes("any")
+    const cutoff = Date.now() - 15 * 24 * 60 * 60 * 1000
 
     return scoredJobs
       .filter(({ job, score }) => {
@@ -248,6 +249,12 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
         if (tab !== "all" && jobStatus !== tab) return false
         if (sourceFilter !== "all" && job.source !== sourceFilter) return false
         if (onlyMatching && score < 30) return false
+
+        // 15-day freshness filter — skip if date is known and older than 15 days
+        if (job.postedAt) {
+          const posted = new Date(job.postedAt).getTime()
+          if (!isNaN(posted) && posted < cutoff) return false
+        }
 
         if (!wantAny) {
           const jt = job.type.toLowerCase()
