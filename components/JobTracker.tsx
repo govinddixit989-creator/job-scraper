@@ -50,12 +50,20 @@ const APIFY_PLATFORMS: { id: string; label: string; flag: string }[] = [
 
 // ─── Match scoring (0-100) ────────────────────────────────────────────────────
 
-// Expand role phrases into individual keywords for fuzzy matching
+// Generic words that appear in almost every job title — useless for matching
+const GENERIC_JOB_WORDS = new Set([
+  "developer", "engineer", "manager", "specialist", "analyst",
+  "lead", "senior", "junior", "staff", "principal", "associate",
+  "intern", "architect", "consultant", "head", "director", "vp",
+  "and", "the", "for", "with",
+])
+
+// Extract only the meaningful/domain-specific keywords from role names
 function roleKeywords(roles: string[]): string[] {
   const words = new Set<string>()
   for (const r of roles) {
-    r.toLowerCase().split(/\s+/).forEach((w) => {
-      if (w.length > 2) words.add(w)
+    r.toLowerCase().split(/[\s/,]+/).forEach((w) => {
+      if (w.length > 2 && !GENERIC_JOB_WORDS.has(w)) words.add(w)
     })
   }
   return [...words]
