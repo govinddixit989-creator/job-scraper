@@ -49,48 +49,70 @@ const APIFY_PLATFORMS: { id: string; label: string; flag: string }[] = [
 ]
 
 // ─── Match scoring (0-100) ────────────────────────────────────────────────────
+
+// Expand role phrases into individual keywords for fuzzy matching
+function roleKeywords(roles: string[]): string[] {
+  const words = new Set<string>()
+  for (const r of roles) {
+    r.toLowerCase().split(/\s+/).forEach((w) => {
+      if (w.length > 2) words.add(w)
+    })
+  }
+  return [...words]
+}
+
 function computeMatch(job: Job, prefs: UserPreferences): number {
-  const text = `${job.title} ${job.tags.join(" ")} ${job.company} ${job.location}`.toLowerCase()
-  const userSkills = prefs.skills.map((s) => s.toLowerCase())
-  const userRoles  = prefs.roles.map((r) => r.toLowerCase())
+  const titleLower = job.title.toLowerCase()
+  const tagText    = job.tags.join(" ").toLowerCase()
+  const fullText   = `${titleLower} ${tagText}`
 
-  // Role match — 0-35 pts
-  const roleHits = userRoles.filter((r) => text.includes(r)).length
-  const roleScore = Math.min(35, roleHits * (35 / Math.max(userRoles.length, 1)))
+  const userSkills  = prefs.skills.map((s) => s.toLowerCase())
+  const userRoleKws = roleKeywords(prefs.roles)
 
-  // Skill match — 0-40 pts (most important signal)
-  const skillHits = userSkills.filter((s) => text.includes(s)).length
-  const skillScore = userSkills.length
-    ? Math.min(40, (skillHits / Math.min(userSkills.length, 10)) * 40)
-    : 20
+  // ── Skill match — 0-50 pts (primary signal) ────────────────────────────────
+  // Check how many of user's skills appear in title + tags
+  const skillHits = userSkills.filter((s) => fullText.includes(s)).length
+  // If the job has NO tags at all → neutral 8pts (not 20; can't know if relevant)
+  const hasTags = job.tags.length > 0
+  const skillScore = !hasTags
+    ? 8
+    : Math.min(50, (skillHits / Math.min(userSkills.length, 8)) * 50)
 
-  // Work type match — 0-15 pts
+  // ── Role keyword match — 0-30 pts ──────────────────────────────────────────
+  // Match individual words from role names against job title
+  const roleHits = userRoleKws.filter((kw) => titleLower.includes(kw)).length
+  const roleScore = Math.min(30, (roleHits / Math.max(userRoleKws.length, 1)) * 60)
+
+  // ── Work type — 0-12 pts ───────────────────────────────────────────────────
   const wantAny = prefs.workTypes.includes("any")
   const jt = job.type.toLowerCase()
   let workScore = 0
   if (wantAny) {
-    workScore = 15
+    workScore = 12
   } else {
-    if (prefs.workTypes.includes("remote")   && jt.includes("remote"))   workScore = 15
-    if (prefs.workTypes.includes("contract") && (jt.includes("contract") || jt.includes("freelance"))) workScore = 15
-    if (prefs.workTypes.includes("fulltime") && (jt.includes("full") || jt.includes("permanent")))     workScore = 15
+    if (prefs.workTypes.includes("remote")   && jt.includes("remote"))   workScore = 12
+    if (prefs.workTypes.includes("contract") && (jt.includes("contract") || jt.includes("freelance"))) workScore = 12
+    if (prefs.workTypes.includes("fulltime") && (jt.includes("full") || jt.includes("permanent")))     workScore = 12
   }
 
-  // Seniority match — 0-10 pts
+  // ── Seniority — 0-8 pts ────────────────────────────────────────────────────
   const sen = prefs.seniority ?? "mid"
-  const titleLower = job.title.toLowerCase()
-  let senScore = 5 // neutral default
+  let senScore = 4
   if (sen === "fresher" || sen === "junior") {
-    if (titleLower.includes("junior") || titleLower.includes("entry") || titleLower.includes("associate")) senScore = 10
+    if (titleLower.includes("junior") || titleLower.includes("entry") || titleLower.includes("associate")) senScore = 8
     if (titleLower.includes("senior") || titleLower.includes("lead") || titleLower.includes("principal")) senScore = 0
   } else if (sen === "senior" || sen === "lead") {
-    if (titleLower.includes("senior") || titleLower.includes("lead") || titleLower.includes("staff") || titleLower.includes("principal")) senScore = 10
+    if (titleLower.includes("senior") || titleLower.includes("lead") || titleLower.includes("staff") || titleLower.includes("principal")) senScore = 8
     if (titleLower.includes("junior") || titleLower.includes("entry")) senScore = 0
-  } else {
-    senScore = 5 // mid-level matches most things
   }
 
-  return Math.round(roleScore + skillScore + workScore + senScore)
+  const total = Math.round(skillScore + roleScore + workScore + senScore)
+
+  // ── Hard zero: completely irrelevant ───────────────────────────────────────
+  // If no skill match AND no role keyword in title → score 0 regardless
+  if (skillHits === 0 && roleHits === 0) return 0
+
+  return total
 }
 
 function MatchBadge({ score }: { score: number }) {
@@ -138,7 +160,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
   const [fetchedAt, setFetchedAt] = useState("")
   const [scrapingPlatform, setScrapingPlatform] = useState<string | null>(null)
   const [scrapeMsg, setScrapeMsg] = useState("")
-  const [onlyMatching, setOnlyMatching] = useState(false)
+  const [onlyMatching, setOnlyMatching] = useState(true)
 
   const loadJobs = useCallback(async (force = false) => {
     if (!force) {
@@ -217,7 +239,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
         const jobStatus = statuses[job.id] ?? "new"
         if (tab !== "all" && jobStatus !== tab) return false
         if (sourceFilter !== "all" && job.source !== sourceFilter) return false
-        if (onlyMatching && score < 40) return false
+        if (onlyMatching && score < 30) return false
 
         if (!wantAny) {
           const jt = job.type.toLowerCase()
@@ -293,10 +315,17 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
       </div>
 
       {/* Stats row */}
-      <div className="flex items-center gap-4 text-sm text-muted-foreground">
-        <span><span className="font-semibold text-foreground">{jobs.length}</span> total jobs</span>
-        <span><span className="font-semibold text-green-600">{highMatchCount}</span> high match (≥70%)</span>
+      <div className="flex items-center gap-4 text-sm text-muted-foreground flex-wrap">
+        <span><span className="font-semibold text-foreground">{jobs.length}</span> total</span>
+        <span><span className="font-semibold text-green-600">{highMatchCount}</span> strong match (≥70%)</span>
         <span><span className="font-semibold text-foreground">{filtered.length}</span> shown</span>
+        {onlyMatching && (
+          <span className="text-xs">
+            <span className="font-semibold text-muted-foreground">
+              {scoredJobs.filter(({ score }) => score < 30).length}
+            </span> irrelevant hidden
+          </span>
+        )}
       </div>
 
       {/* Apify scrape buttons */}
@@ -350,7 +379,7 @@ export default function JobTracker({ preferences, apiKeys, onEditPrefs }: Props)
             onChange={(e) => setOnlyMatching(e.target.checked)}
             className="rounded"
           />
-          <span className="text-muted-foreground">Only matching (≥40%)</span>
+          <span className="text-muted-foreground">Relevant only</span>
         </label>
 
         <button
