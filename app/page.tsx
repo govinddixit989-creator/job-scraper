@@ -6,16 +6,17 @@ import {
   getPreferences, savePreferences, clearPreferences,
   getApiKeys, saveApiKeys, clearApiKeys,
 } from "@/lib/storage"
-import KeySetup from "@/components/KeySetup"
+import KeySetup  from "@/components/KeySetup"
 import Onboarding from "@/components/Onboarding"
 import JobTracker from "@/components/JobTracker"
-import { Briefcase, LogOut } from "lucide-react"
+import Settings   from "@/components/Settings"
+import { Briefcase, Settings as SettingsIcon, LogOut } from "lucide-react"
 
-type AppState = "loading" | "keys" | "onboarding" | "tracker"
+type AppState = "loading" | "keys" | "onboarding" | "tracker" | "settings"
 
 export default function Home() {
   const [state, setState] = useState<AppState>("loading")
-  const [keys, setKeys] = useState<ApiKeys | null>(null)
+  const [keys,  setKeys]  = useState<ApiKeys | null>(null)
   const [prefs, setPrefs] = useState<UserPreferences | null>(null)
 
   useEffect(() => {
@@ -23,9 +24,9 @@ export default function Home() {
     const p = getPreferences()
     setKeys(k)
     setPrefs(p)
-    if (!k) setState("keys")
+    if (!k)      setState("keys")
     else if (!p) setState("onboarding")
-    else setState("tracker")
+    else         setState("tracker")
   }, [])
 
   const handleKeys = (k: ApiKeys) => {
@@ -46,6 +47,16 @@ export default function Home() {
     setState("onboarding")
   }
 
+  const handleSaveKeys = (k: ApiKeys) => {
+    saveApiKeys(k)
+    setKeys(k)
+  }
+
+  const handleSavePrefs = (p: UserPreferences) => {
+    savePreferences(p)
+    setPrefs(p)
+  }
+
   const handleLogout = () => {
     clearApiKeys()
     clearPreferences()
@@ -54,14 +65,28 @@ export default function Home() {
     setState("keys")
   }
 
-  if (state === "loading") return null
-  if (state === "keys") return <KeySetup onComplete={handleKeys} />
-  if (state === "onboarding" && keys) return <Onboarding onComplete={handleOnboarding} apiKeys={keys} />
+  if (state === "loading")   return null
+  if (state === "keys")      return <KeySetup onComplete={handleKeys} />
+  if (state === "onboarding" && keys)
+    return <Onboarding onComplete={handleOnboarding} apiKeys={keys} />
+
+  if (state === "settings" && keys && prefs)
+    return (
+      <Settings
+        apiKeys={keys}
+        preferences={prefs}
+        onSaveKeys={handleSaveKeys}
+        onSavePrefs={handleSavePrefs}
+        onBack={() => setState("tracker")}
+      />
+    )
 
   if (state === "tracker" && keys && prefs) {
     return (
       <main className="min-h-screen bg-background">
         <div className="max-w-7xl mx-auto px-4 py-8 space-y-6">
+
+          {/* Header */}
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-lg bg-primary flex items-center justify-center">
               <Briefcase size={18} className="text-primary-foreground" />
@@ -72,16 +97,30 @@ export default function Home() {
                 RemoteOK · WeWorkRemotely · Remotive · LinkedIn
               </p>
             </div>
-            <button
-              onClick={handleLogout}
-              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors"
-              title="Clear keys and log out"
-            >
-              <LogOut size={13} /> Log out
-            </button>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setState("settings")}
+                className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                title="Settings"
+              >
+                <SettingsIcon size={15} /> Settings
+              </button>
+              <span className="text-border">|</span>
+              <button
+                onClick={handleLogout}
+                className="flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+                title="Clear keys and log out"
+              >
+                <LogOut size={13} /> Log out
+              </button>
+            </div>
           </div>
 
-          <JobTracker preferences={prefs} apiKeys={keys} onEditPrefs={handleEditPrefs} />
+          <JobTracker
+            preferences={prefs}
+            apiKeys={keys}
+            onEditPrefs={handleEditPrefs}
+          />
         </div>
       </main>
     )
